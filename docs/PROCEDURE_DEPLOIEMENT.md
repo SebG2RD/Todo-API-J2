@@ -1,4 +1,4 @@
-# Procédure de déploiement — Todo API
+# Procédure de déploiement de la Todo API
 
 Ce document n'explique pas comment le système fonctionne : il dit quoi taper,
 dans quel ordre, et comment vérifier que ça a marché. Pour comprendre
@@ -8,11 +8,11 @@ rester ici.
 Toutes les commandes se collent telles quelles. Les seules valeurs à remplacer
 sont écrites `<comme ceci>`.
 
-- **Durée d'un déploiement normal** : 45 s à 1 min 15 de bout en bout.
+- Durée d'un déploiement normal : 45 s à 1 min 15 de bout en bout.
   Au-delà de 3 minutes, quelque chose ne va pas : aller directement au § 6.
-- **Coupure attendue** : 8 à 12 secondes, le temps que le conteneur `todo-api`
+- Coupure attendue : 8 à 12 secondes, le temps que le conteneur `todo-api`
   soit recréé. La stratégie est un *recreate* assumé.
-- **Fenêtre de maintenance** : aucune contrainte, projet de formation. Sur un
+- Fenêtre de maintenance : aucune contrainte, projet de formation. Sur un
   vrai service, une coupure de 10 s se pose hors heures de pointe.
 
 ---
@@ -21,7 +21,7 @@ sont écrites `<comme ceci>`.
 
 | Élément | Valeur | Où le trouver |
 | --- | --- | --- |
-| Clé privée de déploiement | `deploy_key` | À la racine du dépôt local, **jamais versionnée**. Si elle manque, voir § 7. |
+| Clé privée de déploiement | `deploy_key` | À la racine du dépôt local, jamais versionnée. Si elle manque, voir § 7. |
 | Machine cible | `localhost`, port SSH **2222** | Conteneur `vm-prod` sur le poste de travail |
 | Utilisateur | `root` | Maquette jetable. Sur une vraie machine, ce serait un compte `deploy` sans sudo. |
 | Dossier de déploiement | `/srv/todo` | Sur la machine cible |
@@ -38,7 +38,7 @@ cd "<racine du dépôt>"
 SSH="ssh -i deploy_key -p 2222 root@localhost"
 ```
 
-**Vérification** : `$SSH "echo ok"` doit répondre `ok`. Si non, § 7.
+Vérification : `$SSH "echo ok"` doit répondre `ok`. Si non, § 7.
 
 ---
 
@@ -48,18 +48,18 @@ Ces trois relevés servent de point de comparaison. Sans eux, impossible de
 prouver après coup que le déploiement a amélioré ou dégradé les choses.
 
 ```bash
-# 2.1 — Quelle version tourne actuellement ? Noter ce sha : c'est la cible du
+# 2.1. Quelle version tourne actuellement ? Noter ce sha : c'est la cible du
 #       retour arrière du § 5.
 $SSH "docker inspect -f '{{.Config.Image}}' todo-api"
 
-# 2.2 — Tout est-il debout ?
+# 2.2. Tout est-il debout ?
 $SSH "docker ps --format '{{.Names}}\t{{.Status}}'"
 
-# 2.3 — Le service répond-il, là, maintenant ?
+# 2.3. Le service répond-il, là, maintenant ?
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/health
 ```
 
-**Vérifications attendues** :
+Vérifications attendues :
 
 - 2.1 affiche `nghtmre/todo-api:<40 caractères hexadécimaux>`. S'il affiche
   `latest`, quelqu'un a déployé à la main hors pipeline : le retour arrière
@@ -70,9 +70,9 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/health
 
 ---
 
-## 3. Déploiement automatique — le cas normal
+## 3. Déploiement automatique : le cas normal
 
-**Il n'y a rien à taper.** Un `git push` sur `main` suffit :
+Il n'y a rien à taper. Un `git push` sur `main` suffit :
 
 1. `test` et `test-integration` tournent sur des machines fournies par GitHub.
 2. `build` construit l'image et la pousse sur Docker Hub, taguée au sha.
@@ -80,10 +80,10 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/health
    cible, envoie `deploy/`, lance `docker compose up -d`, puis interroge
    `/health` jusqu'à obtenir un `200`.
 
-**Vérification** : dans l'onglet Actions, les quatre jobs sont verts. Le job
+Vérification : dans l'onglet Actions, les quatre jobs sont verts. Le job
 `deploy` affiche `/health répond 200 après N tentative(s)`.
 
-**Prérequis à contrôler une fois pour toutes**, sinon rien ne part :
+Prérequis à contrôler une fois pour toutes, sinon rien ne part :
 
 ```bash
 gh secret list   # doit lister DOCKERHUB_USERNAME, DOCKERHUB_TOKEN,
@@ -92,61 +92,61 @@ gh api repos/<compte>/<dépôt>/actions/runners --jq '.runners[] | "\(.name) \(.
                  # doit afficher : vm-prod-host online
 ```
 
-Un runner `offline` laisse le job `deploy` en **Queued indéfiniment**, sans
+Un runner `offline` laisse le job `deploy` en Queued indéfiniment, sans
 message d'erreur. C'est le comportement normal, pas une panne de GitHub : aller
 au § 7.3.
 
 ---
 
-## 4. Déploiement manuel — quand la pipeline n'est pas disponible
+## 4. Déploiement manuel : quand la pipeline n'est pas disponible
 
 À n'utiliser que si GitHub Actions est en panne ou le runner injoignable.
 
 ```bash
-# 4.1 — Choisir la version. Un sha de commit, jamais "latest".
+# 4.1. Choisir la version. Un sha de commit, jamais "latest".
 SHA=<sha du commit à déployer>
 
-# 4.2 — Vérifier que l'image existe AVANT de toucher à la production.
+# 4.2. Vérifier que l'image existe AVANT de toucher à la production.
 docker manifest inspect nghtmre/todo-api:$SHA > /dev/null && echo "image trouvée"
 ```
 
-**Vérification** : la commande affiche `image trouvée`. Si elle répond
+Vérification : la commande affiche `image trouvée`. Si elle répond
 `manifest unknown`, le tag n'existe pas : ne pas continuer, reprendre au 4.1.
 
 ```bash
-# 4.3 — Envoyer la description de la stack (compose, Prometheus, Grafana).
+# 4.3. Envoyer la description de la stack (compose, Prometheus, Grafana).
 $SSH "mkdir -p /srv/todo"
 scp -i deploy_key -P 2222 -r deploy/. root@localhost:/srv/todo/
 $SSH "rm -f /srv/todo/env.example"
 ```
 
-**Vérification** : `$SSH "ls /srv/todo"` liste `compose.yml`, `prometheus.yml`,
+Vérification : `$SSH "ls /srv/todo"` liste `compose.yml`, `prometheus.yml`,
 `grafana` et `.env`. Si `.env` manque, voir § 7.4.
 
 ```bash
-# 4.4 — Déployer.
+# 4.4. Déployer.
 $SSH "cd /srv/todo && IMAGE='nghtmre/todo-api' TAG='$SHA' docker compose up -d"
 ```
 
-**Vérification** : la sortie affiche `Container todo-api Started` ou
+Vérification : la sortie affiche `Container todo-api Started` ou
 `Recreated`. Le code de sortie de la commande est `0` (`echo $?`).
 
 ```bash
-# 4.5 — Vérifier que le service répond réellement.
+# 4.5. Vérifier que le service répond réellement.
 sleep 12
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/health
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks
 ```
 
-**Vérification** : les deux répondent `200`. `/health` seul ne suffit pas : il
+Vérification : les deux répondent `200`. `/health` seul ne suffit pas : il
 ne touche pas la base, et répond `200` même quand la base est morte.
 
 ```bash
-# 4.6 — Confirmer la version réellement en place.
+# 4.6. Confirmer la version réellement en place.
 $SSH "docker inspect -f '{{.Config.Image}}' todo-api"
 ```
 
-**Vérification** : le sha affiché est bien celui du 4.1.
+Vérification : le sha affiché est bien celui du 4.1.
 
 ---
 
@@ -169,19 +169,19 @@ PRECEDENT=<sha précédent>
 $SSH "cd /srv/todo && IMAGE='nghtmre/todo-api' TAG='$PRECEDENT' docker compose up -d"
 ```
 
-**Vérification** : `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks`
+Vérification : `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks`
 répond `200`, et le panneau **Disponibilité** de Grafana repasse à `EN LIGNE`.
 
-**Durée mesurée** : 11,8 secondes entre le lancement de la commande et le
+Durée mesurée : 11,8 secondes entre le lancement de la commande et le
 premier `200` sur `/api/tasks`. Aucune reconstruction, aucune pipeline : l'image
 précédente est encore sur Docker Hub, taguée à son sha.
 
-**Si le tag n'existe pas** : la commande échoue avec
-`manifest unknown` et **la production n'est pas touchée** — l'ancienne version
+Si le tag n'existe pas : la commande échoue avec
+`manifest unknown` et la production n'est pas touchée, l'ancienne version
 continue de servir. Vérifié. Reprendre avec un sha valide, à retrouver dans
 l'historique Git ou sur Docker Hub.
 
-**Limite connue** : ce retour arrière ne concerne que le code. Si le
+Limite connue : ce retour arrière ne concerne que le code. Si le
 déploiement fautif a modifié le schéma de la base, revenir sur le code sans
 revenir sur le schéma peut casser autant que le bug qu'on fuyait. À ce jour,
 `db/schema.sql` n'utilise que des `CREATE ... IF NOT EXISTS` : aucune migration
@@ -197,11 +197,11 @@ Ces quatre signatures ont été mesurées sur cette machine, sous une charge de
 Toutes ces valeurs ont été relevées en rejouant chaque panne, pas déduites.
 Le premier tri se fait sur `up`, et il partage les pannes en deux familles.
 
-### Famille A — `up` vaut 0, et `curl` depuis le poste répond `000`
+### Famille A : `up` vaut 0, et `curl` depuis le poste répond `000`
 
 `000` n'est pas un code HTTP : c'est `curl` qui n'a même pas obtenu de
-connexion. Trois pannes différentes donnent cette même image, et **seul
-`docker ps` les sépare**. C'est la commande à taper en premier.
+connexion. Trois pannes différentes donnent cette même image, et seul
+`docker ps` les sépare. C'est la commande à taper en premier.
 
 ```bash
 $SSH "docker ps -a --format '{{.Names}}\t{{.Status}}'"
@@ -210,26 +210,26 @@ $SSH "docker ps -a --format '{{.Names}}\t{{.Status}}'"
 | # | Panne | Ce qu'affiche `docker ps -a` pour `todo-api` | Confirmation |
 | --- | --- | --- | --- |
 | 1 | `todo-api` arrêté | `Exited (137)` ou `Exited (0)` | `docker logs` s'arrête net, sans erreur |
-| 3 | Réseau coupé entre l'API et la base | **`Up (healthy)`** | `docker inspect -f '{{.NetworkSettings.Networks}}' todo-api` renvoie une liste **vide**, et `docker port todo-api` n'affiche **rien** |
+| 3 | Réseau coupé entre l'API et la base | `Up (healthy)` | `docker inspect -f '{{.NetworkSettings.Networks}}' todo-api` renvoie une liste vide, et `docker port todo-api` n'affiche rien |
 | 4 | `todo-api` relancé sans sa configuration | `Exited (1)` | `docker logs todo-api` affiche `Démarrage impossible : Variable d'environnement manquante : DB_HOST` |
 
 La panne 3 est la plus déroutante des trois : le conteneur tourne, se déclare
 `healthy`, et pourtant plus rien ne l'atteint. Détaché de son réseau, il perd
-aussi la publication de son port 3000 — d'où le `000` côté poste et le `up` à 0
+aussi la publication de son port 3000, d'où le `000` côté poste et le `up` à 0
 côté Prometheus, qui ne le joint plus non plus.
 
 Délai de détection mesuré : `up` passe à 0 en **8 secondes** après l'arrêt du
 conteneur, pour un `scrape_interval` de 5 s.
 
-### Famille B — `up` vaut 1, le service répond mais quelque chose cloche
+### Famille B : `up` vaut 1, le service répond mais quelque chose cloche
 
-Ici, c'est le **p95** qui tranche, pas le taux d'erreur.
+Ici, c'est le p95 qui tranche, pas le taux d'erreur.
 
 | # | Panne | Taux 5xx | p95 | Lecture |
 | --- | --- | --- | --- | --- |
-| 2 | `todo-db` arrêté | **61 %** | **4,8 s** | Erreurs **et** latence. Le p95 colle aux 3 s de `connectionTimeoutMillis` : ça échoue **lentement**, donc en aval. |
-| 5 | Machine saturée (conteneurs dévoreurs de CPU) | **0 %** | **83 ms** au lieu de 21 | Latence multipliée par 4 **sans une seule erreur**. Le seul cas de cette forme. |
-| — | Régression de code déployée | **33 %** | **24 ms** | Erreurs **sans** latence : ça échoue **vite**, donc dans le code. L'inverse exact de la panne 2. |
+| 2 | `todo-db` arrêté | **61 %** | **4,8 s** | Erreurs **et** latence. Le p95 colle aux 3 s de `connectionTimeoutMillis` : ça échoue lentement, donc en aval. |
+| 5 | Machine saturée (conteneurs dévoreurs de CPU) | **0 %** | **83 ms** au lieu de 21 | Latence multipliée par 4 sans une seule erreur. Le seul cas de cette forme. |
+| hors script | Régression de code déployée | **33 %** | **24 ms** | Erreurs sans latence : ça échoue vite, donc dans le code. L'inverse exact de la panne 2. |
 
 Pour la 2, vérifier `docker ps` : `todo-db` y est `Exited`. Pour la 5,
 `docker ps` liste des conteneurs `hog-*` qui n'ont rien à faire là.
@@ -239,7 +239,7 @@ Pour la 2, vérifier `docker ps` : `todo-db` y est `Exited`. Pour la 5,
 `docker ps` affiche `todo-api` en **`healthy`** dans les pannes **2, 3 et 5**,
 et aussi quand une régression de code est en production. Le `HEALTHCHECK`
 interroge `/health` depuis l'intérieur du conteneur, et `/health` ne touche pas
-la base — c'est délibéré, pour qu'une panne de base ne déclenche pas des
+la base, c'est délibéré, pour qu'une panne de base ne déclenche pas des
 redémarrages en boucle. **Un `healthy` ne prouve rien d'autre que « le process
 Node répond à lui-même ».** La seule commande qui prouve que le service marche
 vraiment est celle qui traverse toute la chaîne :
@@ -257,14 +257,14 @@ $SSH "docker start todo-api"
 # Panne 2
 $SSH "docker start todo-db"
 
-# Panne 3 — réattacher le conteneur à son réseau
+# Panne 3 : réattacher le conteneur à son réseau
 $SSH "docker network connect todo-prod todo-api && docker restart todo-api"
 
-# Panne 4 — redéployer proprement (§ 4.4) avec le sha relevé au § 2.1
+# Panne 4 : redéployer proprement (§ 4.4) avec le sha relevé au § 2.1
 $SSH "docker inspect -f '{{.Config.Image}}' todo-api"   # pour lire le sha en cours
 $SSH "cd /srv/todo && IMAGE='nghtmre/todo-api' TAG='<sha>' docker compose up -d"
 
-# Panne 5 — supprimer les conteneurs dévoreurs
+# Panne 5 : supprimer les conteneurs dévoreurs
 $SSH "docker rm -f \$(docker ps -aq --filter name=hog-)"
 ```
 
@@ -300,7 +300,7 @@ sleep 30      # le daemon Docker interne met ~25 s à accepter des connexions
 $SSH "docker ps"
 ```
 
-**Vérification** : les quatre conteneurs remontent seuls, grâce au
+Vérification : les quatre conteneurs remontent seuls, grâce au
 `restart: unless-stopped`. Vérifié après un redémarrage complet du poste.
 
 ### 7.3 Le job `deploy` reste « Queued » sans erreur
@@ -326,7 +326,7 @@ $SSH "cat > /srv/todo/.env" < deploy/env.example
 $SSH "vi /srv/todo/.env && chmod 600 /srv/todo/.env"
 ```
 
-**Vérification** : `$SSH "cut -d= -f1 /srv/todo/.env"` liste `DB_NAME`,
+Vérification : `$SSH "cut -d= -f1 /srv/todo/.env"` liste `DB_NAME`,
 `DB_USER`, `DB_PASSWORD`. Ne jamais afficher le fichier entier dans un
 terminal partagé.
 
@@ -355,7 +355,7 @@ $SSH "docker ps --format '{{.Names}}\t{{.Ports}}' | grep 3000"
 $SSH "docker rm -f <le nom affiché>"
 ```
 
-**Vérification** : `$SSH "docker ps --format '{{.Ports}}' | grep -c 3000"`
+Vérification : `$SSH "docker ps --format '{{.Ports}}' | grep -c 3000"`
 répond `0` avant de relancer le § 4.4.
 
 ### 7.7 Un panneau Grafana est vide
@@ -388,16 +388,16 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks
 curl -s http://localhost:3000/metrics | head -3
 ```
 
-**Vérifications attendues** :
+Vérifications attendues :
 
 - quatre conteneurs, `todo-api` et `todo-db` en `(healthy)` ;
 - le sha affiché est celui qu'on voulait déployer, pas celui du § 2.1 ;
 - `/health` répond `{"status":"ok",...}` ;
-- `/api/tasks` répond `200` — c'est celui-là qui prouve que la base répond ;
+- `/api/tasks` répond `200`, c'est celui-là qui prouve que la base répond ;
 - `/metrics` commence par `# HELP`, en texte brut.
 
 Puis, sur Grafana (<http://localhost:3001>), tableau de bord
-**Todo API — les quatre signaux** : Disponibilité à `EN LIGNE`, et le taux
+**Todo API, les quatre signaux** : Disponibilité à `EN LIGNE`, et le taux
 d'erreur revenu sous 1 % dans les deux minutes.
 
 ---
@@ -413,5 +413,5 @@ d'erreur revenu sous 1 % dans les deux minutes.
 
 Après tout incident, écrire un compte rendu sans chercher de coupable :
 chronologie minute par minute, impact réel, cause profonde, et les actions
-concrètes pour que la même panne ne revienne pas — avec un responsable et une
+concrètes pour que la même panne ne revienne pas, avec un responsable et une
 échéance par action. Le compte rendu va dans le Journal de bord du `README.md`.

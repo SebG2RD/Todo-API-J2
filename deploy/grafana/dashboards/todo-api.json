@@ -1,6 +1,6 @@
 {
   "uid": "todo-api-golden",
-  "title": "Todo API — les quatre signaux",
+  "title": "Todo API, les quatre signaux",
   "description": "Un panneau par golden signal, plus deux panneaux propres au metier de cette application. Repond en un coup d'oeil a : est-ce que ca repond, combien, avec quelles erreurs, a quelle vitesse.",
   "tags": ["todo-api", "production"],
   "timezone": "browser",
@@ -13,7 +13,7 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Disponibilite — la cible repond-elle",
+      "title": "Disponibilite : la cible repond-elle",
       "description": "up vaut 1 si le dernier scrape a reussi, 0 sinon. Genere par Prometheus, sans une ligne de code cote application : une app plantee ne peut pas mentir dessus.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
@@ -56,7 +56,7 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Trafic — requetes par seconde",
+      "title": "Trafic : requetes par seconde",
       "description": "rate() sur un counter : c'est sa vitesse de progression qui compte, jamais sa valeur brute. Lu brut, http_requests_total ne dirait que le cumul depuis le demarrage.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 5, "w": 9, "x": 6, "y": 0 },
@@ -118,7 +118,7 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Erreurs — part de reponses 5xx",
+      "title": "Erreurs : part de reponses 5xx",
       "description": "Seuil a 5 % : au-dessus pendant plus de deux minutes, la procedure de deploiement declenche un retour arriere sans validation supplementaire. Sans trafic, le rapport n'est pas defini et le panneau reste vide : c'est normal, pas une panne.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
@@ -166,7 +166,7 @@
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Latence — p95 du temps de reponse",
+      "title": "Latence : p95 du temps de reponse",
       "description": "95 % des requetes sont plus rapides que cette valeur. La moyenne mentirait : une API a 50 ms qui traine a 4 s pour 5 % des appels garde une moyenne honorable qui ne raconte rien du vecu de ces 5 %.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
@@ -207,7 +207,7 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Saturation — memoire et boucle d'evenements",
+      "title": "Saturation : memoire et boucle d'evenements",
       "description": "Le quatrieme signal. Une boucle d'evenements qui prend du retard veut dire que Node n'arrive plus a traiter ce qui arrive, bien avant que les erreurs ne montent.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 7, "w": 24, "x": 0, "y": 13 },

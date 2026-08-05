@@ -40,9 +40,9 @@ conteneurs.
 
 `/health` ne touche jamais la base : il répond `200` même quand PostgreSQL est
 mort. C'est délibéré, pour qu'une panne de base ne fasse pas passer l'API pour
-morte et ne déclenche pas de redémarrages inutiles. La conséquence pratique est
-importante en astreinte : **seul `/api/tasks` prouve que toute la chaîne
-fonctionne**.
+morte et ne déclenche pas de redémarrages inutiles. En astreinte, la
+conséquence est directe : seul `/api/tasks` prouve que toute la chaîne
+fonctionne.
 
 Le service de statistiques, sur le port 8000 :
 
@@ -286,7 +286,7 @@ Todo API/
 ```
 
 Ni `deploy_key`, ni `.env`, ni aucun mot de passe n'entre dans le dépôt. La
-ligne du `.gitignore` qui exclut la clé privée a été écrite **avant** que la
+ligne du `.gitignore` qui exclut la clé privée a été écrite avant que la
 paire existe : une clé poussée par erreur ne se rattrape pas avec un commit de
 suppression, `git log` garde tout.
 
@@ -359,7 +359,7 @@ push sur main
 ```
 
 Les trois premiers jobs tournent sur des machines fournies par GitHub, neuves à
-chaque exécution. Seul `deploy` tourne sur un runner **self-hosted**, et c'est
+chaque exécution. Seul `deploy` tourne sur un runner self-hosted, et c'est
 une décision d'architecture, pas un contournement : la machine cible vit sur le
 poste de travail, derrière une box, sans adresse publique. Un runner hébergé
 dans un centre de données n'a aucun moyen de la joindre. On place donc
@@ -374,7 +374,7 @@ s'exécute sur la machine personnelle.
 Une vraie machine de production demande un compte chez un hébergeur. Elle est
 remplacée par une maquette, décrite dans `Dockerfile.vm` : un conteneur qui
 embarque son propre daemon Docker et un serveur SSH. Du point de vue de la
-pipeline, rien ne la distingue d'un vrai serveur — une adresse, un port, un
+pipeline, rien ne la distingue d'un vrai serveur : une adresse, un port, un
 utilisateur, une clé, un Docker au bout. Et son Docker ne voit aucun conteneur
 du poste de travail : une panne en « production » ne touche jamais
 l'environnement de développement.
@@ -407,10 +407,10 @@ l'extérieur.
 ### Surveillance
 
 Prometheus et Grafana vivent dans le même `compose.yml` que l'API, sur le même
-réseau : Prometheus joint l'application par son **nom de service**, sans qu'un
+réseau : Prometheus joint l'application par son nom de service, sans qu'un
 seul port soit publié pour ça.
 
-- Grafana : <http://localhost:3001>, tableau de bord **Todo API — les quatre
+- Grafana : <http://localhost:3001>, tableau de bord **Todo API, les quatre
   signaux**, lecture anonyme activée pour qu'un camarade d'astreinte n'ait pas
   à réclamer un mot de passe.
 - Prometheus : <http://localhost:9090>, `scrape_interval` de 5 s.
@@ -732,11 +732,255 @@ Note d'exploitation : Docker Desktop s'est arrêté en cours de session. Au red�
 les quatre conteneurs sont remontés seuls, sans intervention, grâce au
 `restart: unless-stopped` posé sur chaque service. Les données étaient intactes.
 
+### Jour 3, phases 1 à 4 : la pipeline atteint une vraie machine
+
+La pipeline de la veille vivait sur le projet d'échauffement. Le déménagement
+sur la Todo API n'a rien apporté de neuf conceptuellement, et c'est pour ça
+qu'il a été rapide : lint, tests, image taguée au sha.
+
+Le premier run a donné exactement le résultat que le cours annonce. Le job
+`test` est passé en 12 s, le job `build` a échoué seul, sur
+`Error: Username and password required`. Le log montrait `IMAGE: /todo-api`,
+avec le pseudo vide devant la barre oblique : le secret `DOCKERHUB_USERNAME`
+n'existait pas encore. La panne était localisée, les tests toujours verts.
+C'est le troisième scénario demandé en phase 1, obtenu sans avoir à le
+provoquer.
+
+La machine cible tient en un `Dockerfile.vm` de vingt lignes. Les trois
+vérifications passent : `docker ps` à l'intérieur ne montre aucun conteneur de
+développement, une connexion sans `-i deploy_key` est refusée avec
+`Permission denied (publickey)`, et un `docker restart vm-prod` retrouve les
+images grâce au volume.
+
+Cassé, et c'est une erreur de méthode plus que de code : la première
+vérification du volume affichait une liste d'images vide, ce qui laissait
+croire que le volume ne servait à rien. En réalité, la commande de test était
+`docker run --rm hello-world | head -4`. Le `head` fermait le tube au
+quatrième ligne, `docker` recevait un SIGPIPE en plein téléchargement, et
+l'image n'était jamais arrivée au bout. Le volume marchait très bien. Vérifier
+ce que la commande de contrôle fait réellement avant d'accuser ce qu'elle
+mesure.
+
+Le runner self-hosted a demandé une correction que le cours ne mentionne pas,
+parce qu'elle est propre à Windows. Le premier job a échoué sur
+`WSL (2289 - Relay) ERROR: CreateProcessCommon:818: execvpe(/bin/bash) failed`.
+GitHub Actions résout `shell: bash` en cherchant `bash` dans le PATH, et sur
+Windows `C:\Windows\System32\bash.exe` arrive en premier : c'est celui de WSL,
+qui n'a aucune distribution installée. Deux corrections étaient possibles,
+écrire le chemin complet du bash de Git dans le YAML, ou corriger le PATH du
+runner. J'ai choisi la seconde, par un fichier `.env` dans le dossier du
+runner : le YAML reste portable, et rien dans le dépôt ne suppose Windows.
+
+Preuve mesurée que le runner tourne bien chez moi, avec le workflow
+`verifier-runner.yml` : le job self-hosted affiche `G2RD-Surface` et liste
+`vm-prod` avec ses quatre ports, quand le job `ubuntu-latest` affiche
+`runnervmvrwv9` et une liste de conteneurs vide.
+
+Piège de redémarrage à connaître : après avoir tué puis relancé l'agent, GitHub
+a mis environ deux minutes à libérer l'ancienne session
+(`A session for this runner already exists` dans `runner.err`). Pendant ce
+temps, le job restait `in progress` sans jamais démarrer. Annuler et relancer
+le workflow suffit.
+
+### Jour 3, phase 5 : rejouer, et revenir en arrière
+
+L'idempotence se vérifie en deux commandes. Deux `docker compose up -d`
+strictement identiques d'affilée laissent les quatre conteneurs en `Running`,
+sans en recréer un seul, avec exactement un conteneur `todo-api` et aucun
+orphelin. Là où une séquence naïve de `docker run` aurait planté sur un nom
+déjà pris, Compose compare l'état voulu à l'état réel et ne touche que ce qui
+a changé.
+
+Pour le retour arrière, j'ai introduit une régression volontaire : un tri sur
+`creation_date`, colonne qui n'existe pas, à la place de `created_at`. Le
+résultat est la meilleure démonstration du cours que j'aie obtenue de la
+journée.
+
+| Couche de tests | Verdict sur le code cassé |
+| --- | --- |
+| 26 tests unitaires (avec mock) | verts, tous |
+| 12 tests d'intégration (vrai PostgreSQL) | 1 rouge |
+
+Le mock ne connaît pas le schéma réel : il rejoue ce qu'on lui a écrit dans le
+test, et dit oui à n'importe quelle requête SQL. C'est exactement le scénario
+« vendredi 17h32 » du cours, reproduit sur mon propre code.
+
+La pipeline a bloqué le commit sur le job `test-integration`, et `build` n'a
+jamais tourné. Pour jouer quand même le scénario de bout en bout, j'ai poussé
+l'image à la main et déployé la version fautive.
+
+Chronométrage du retour arrière :
+
+| Étape | Durée |
+| --- | --- |
+| Constat de la panne à la commande lancée | quelques secondes, le temps de lire le tableau de bord |
+| Commande de retour arrière au premier `200` sur `/api/tasks` | **11,8 s** |
+
+Aucune reconstruction, aucune pipeline, aucune enquête : l'image précédente
+était encore sur Docker Hub, taguée à son sha. C'est le bénéfice concret
+d'avoir banni `latest` la veille.
+
+Dernier contrôle, un retour arrière vers un tag inexistant. Docker répond
+`manifest for nghtmre/todo-api:000... not found: manifest unknown`, la commande
+sort en code 1, et la production continue de répondre `200` sur la version
+précédente. Rien n'est laissé à moitié éteint, et le code de sortie remonte
+correctement : un vrai job de pipeline échouerait pour de bon.
+
+### Jour 3, phase 6 : les tests qui touchent la base
+
+Douze tests d'intégration couvrent les quatre comportements demandés, et deux
+de plus sur le `PUT`. Le job CI tourne en 35 s avec un conteneur de service
+PostgreSQL et son contrôle de santé `pg_isready`.
+
+Décision prise ici, et je pense que c'est la plus importante du chapitre : le
+schéma est sorti de `src/db.js` pour vivre dans `db/schema.sql`. Le même
+fichier est rejoué par l'application au démarrage, par `npm run migrate` avant
+les tests, et à la main sur la machine cible si besoin. Le cours décrit une
+migration jouée sur la base de test mais jamais sur celle de production ; avec
+une source unique, ce décalage ne peut pas exister.
+
+Contrôle que les tests servent à quelque chose : en remplaçant le
+`DELETE FROM tasks` par un `SELECT 1`, deux tests d'intégration virent au
+rouge. En retirant le garde `isUuid`, cinq tests unitaires virent au rouge. Un
+test qui reste vert quand on casse le code qu'il prétend couvrir n'a pas sa
+place dans le dépôt.
+
+### Jour 3, phase 7 : l'API se met à parler, et le premier vrai bug
+
+L'instrumentation produit un compteur, un histogramme et deux mesures métier.
+Le test qui compte, celui du cours : trois `GET /api/tasks`, puis relecture de
+`/metrics`, et le compteur affiche exactement 3. Une route inconnue est comptée
+sous l'étiquette `<inconnue>` et non sous son URL réelle, sinon un scanner de
+vulnérabilités suffirait à faire tomber Prometheus.
+
+Premier accroc, sur Express. Les métriques étaient étiquetées `route="/:id"`
+au lieu de `route="/api/tasks/:id"`. Express ne garde `req.baseUrl` que le
+temps de la traversée du routeur et le restaure à la sortie, y compris quand
+une erreur remonte. Or l'étiquette est posée sur l'événement `finish`, donc
+après cette restauration. Le préfixe est maintenant figé à l'entrée du routeur,
+et deux routeurs différents ne se mélangent plus dans la même série.
+
+Deuxième accroc, et c'est un vrai défaut de conception que seule la mesure a
+révélé. J'avais branché la métrique `todo_tasks_in_database` sur le callback
+`collect()` de prom-client, donc interrogée à chaque lecture de `/metrics`. En
+coupant la base pour observer la signature de la panne, `up` est tombé à **0**
+alors que `/health` répondait toujours `200`. La requête attendait les 3 s de
+`connectionTimeoutMillis`, `/metrics` dépassait le `scrape_timeout` de
+Prometheus, et le scrape échouait. Autrement dit, la supervision devenait
+aveugle exactement au moment où elle servait, et annonçait « application
+morte » pour une panne de base.
+
+La correction sort la requête du chemin du scrape : un rafraîchissement en
+tâche de fond toutes les 10 secondes, avec `unref()` pour ne pas retarder les
+arrêts de conteneur. Même panne rejouée après correction, la signature est
+juste : `up` reste à 1, le taux d'erreur monte à 61 %, le p95 explose à 4,8 s.
+
+### Jour 3, phase 8 : Prometheus, Grafana, et les relevés
+
+La stack de supervision vit dans le même `compose.yml` que l'API, sur le même
+réseau. La source de données et le tableau de bord sont provisionnés par
+fichier : après un `docker compose down -v`, tout revient sans un clic.
+
+Relevés demandés, sous une charge d'environ 3 requêtes par seconde :
+
+| Moment | `up` | req/s | Taux 5xx | p95 |
+| --- | --- | --- | --- | --- |
+| Au repos, avant la boucle de charge | 1 | 0,04 | non défini | 4,7 ms |
+| Pendant la boucle de charge | 1 | 4,45 | non défini | 13,8 ms |
+| Pendant l'incident (base coupée) | 1 | 0,51 | 61 % | 4,79 s |
+| Après redémarrage de la base | 1 | 0,04 | 0 % | 4,7 ms |
+
+Le taux d'erreur est « non défini » et non « zéro » dans les deux premières
+lignes, et c'est correct : sans aucune réponse 5xx, le rapport
+`5xx / total` n'existe pas pour Prometheus, et le panneau reste vide. Un
+panneau vide n'est donc pas toujours un panneau cassé.
+
+Checkpoint qualité : après `docker stop todo-api`, `up` passe à 0 en
+**8 secondes**, pour un `scrape_interval` de 5 s. Sous les quinze demandées.
+
+Et la distinction qui compte pour diagnostiquer, mesurée sur trois pannes
+différentes :
+
+| Panne | `up` | Taux 5xx | p95 |
+| --- | --- | --- | --- |
+| API arrêtée | 0 | pas de données | pas de données |
+| Base coupée | 1 | 61 % | 4,79 s |
+| Régression de code | 1 | 33 % | 24 ms |
+
+Les deux dernières se ressemblent sur le taux d'erreur et se séparent sur la
+latence. Une panne en aval échoue lentement, le p95 collant au délai du pool.
+Un bug de code échoue vite. Je ne m'attendais pas à ce que le p95 soit le
+discriminant le plus net du tableau de bord, et c'est probablement ce que je
+retiens le plus de la journée.
+
+### Jour 3, phases 9 et 10 : la procédure et l'incident
+
+La procédure vit dans `docs/PROCEDURE_DEPLOIEMENT.md`. Elle a été écrite
+pendant les déploiements, pas après : c'est le seul moment où ce qui deviendra
+évident dans trois mois est encore surprenant.
+
+Mise à l'épreuve immédiate, en tirant une panne au hasard avec
+`scripts/incident.sh` et en ne suivant que le document. Le tirage a donné la
+panne 3, la coupure réseau. Le service est revenu en 12 secondes avec la
+commande de la procédure, donc la réparation était bonne. Sa ligne de
+signature, elle, était fausse.
+
+J'avais écrit « `up` à 1 avec des erreurs, même image que la panne 2 ». La
+réalité mesurée est tout autre : détaché de son réseau, le conteneur perd aussi
+la publication de son port 3000. `curl` depuis le poste ne renvoie même pas un
+code HTTP, il renvoie `000`, et Prometheus ne le joint plus non plus, donc `up`
+tombe à 0. Le conteneur, lui, se déclare `healthy`.
+
+Cette erreur a fait réécrire toute la section 6 de la procédure. Les pannes ne
+se classent plus par numéro, mais en deux familles selon `up`, et pour la
+famille où `up` vaut 0, c'est `docker ps` qui tranche entre trois causes :
+
+| Panne | Ce qu'affiche `docker ps -a` |
+| --- | --- |
+| API arrêtée | `Exited (137)` |
+| Réseau coupé | `Up (healthy)`, sans réseau ni port |
+| Relancée sans configuration | `Exited (1)`, avec `Variable d'environnement manquante : DB_HOST` dans les logs |
+
+La panne 4 a été vérifiée séparément plutôt que déduite, et son log donne
+directement la réponse. C'est le genre de détail qu'on n'écrit pas quand on
+rédige une procédure de mémoire.
+
+Le script d'incident lui-même a demandé une correction. Sa panne de saturation
+lance quatre conteneurs dévoreurs de CPU. Mesuré ici : quatre conteneurs à
+100 % sur une machine à **20 cœurs** occupent 20 % de la machine, et le p95 de
+l'API reste à 21 ms, contre 24 ms au repos. Autrement dit, la panne ne se voit
+pas, et le pilote chercherait ailleurs pendant dix minutes. Le nombre de
+dévoreurs est maintenant calé sur `nproc`, à raison de deux par cœur, et la
+signature devient lisible :
+
+| Charge | req/s | Taux 5xx | p95 |
+| --- | --- | --- | --- |
+| 4 dévoreurs sur 20 cœurs | 2,87 | 0 % | 21 ms |
+| 40 dévoreurs sur 20 cœurs | 2,07 | 0 % | 83 ms |
+
+La latence est multipliée par quatre sans une seule erreur. C'est la seule
+panne de cette forme, donc la plus facile à identifier une fois qu'elle est
+visible.
+
+### Jour 3, note d'exploitation
+
+Docker Desktop s'est arrêté en cours de session, et la machine cible avec lui.
+Au redémarrage de `vm-prod`, les quatre conteneurs de production sont remontés
+seuls en une trentaine de secondes, sans intervention, grâce au
+`restart: unless-stopped`. Le volume `vm-prod-data` a gardé les images, rien
+n'a été retéléchargé. Le daemon Docker interne met environ 25 s à accepter des
+connexions : un déploiement lancé trop tôt après un redémarrage échouera sur un
+`Connection refused` qui n'a rien d'inquiétant.
+
 ## À venir
 
-- [ ] Tests automatisés (les fichiers `tests/` sont créés mais encore vides)
 - [ ] Restreindre les origines CORS pour la production
 - [ ] Un utilisateur PostgreSQL en lecture seule pour `stats-api`
 - [ ] Pool de connexions côté `stats-api`, qui ouvre et ferme à chaque appel
 - [ ] Secrets Docker plutôt qu'un `.env` pour le mot de passe de la base
-# Todo-API-J2
+- [ ] Une règle d'alerte Grafana sur le taux d'erreur 5xx, avec envoi réel
+- [ ] Un retour arrière déclenché depuis la pipeline plutôt qu'à la main
+- [ ] `node_exporter` et `postgres_exporter` sur la machine cible, pour mesurer
+      la machine et la base et non plus seulement l'application
+- [ ] Instrumenter `stats-api` de la même façon, pour qu'il apparaisse aussi
+      dans le tableau de bord
