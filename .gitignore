@@ -1,0 +1,5 @@
+node_modules
+.env
+
+# Supports de cours : lus, pas versionnés
+*.pdf
