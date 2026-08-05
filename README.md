@@ -972,6 +972,42 @@ n'a été retéléchargé. Le daemon Docker interne met environ 25 s à accepter
 connexions : un déploiement lancé trop tôt après un redémarrage échouera sur un
 `Connection refused` qui n'a rien d'inquiétant.
 
+### Jour 3, le run qui ferme la chaîne
+
+Pendant toute la journée, la pipeline est restée rouge sur le job `build`, avec
+`Error: Username and password required`. Une seule cause, et elle n'avait rien
+de technique : le secret `DOCKERHUB_TOKEN` n'existait pas. Comme `deploy`
+déclare `needs: [build]`, il restait `skipped` à chaque push. Les deux jobs de
+test, eux, étaient verts depuis le début.
+
+Ce rouge-là a une valeur pédagogique que je ne soupçonnais pas : il montre
+qu'un job manquant en amont ne produit aucune erreur en aval, juste un silence.
+Un `skipped` ressemble beaucoup à « tout va bien » quand on lit vite.
+
+Le secret posé, le premier run complet donne :
+
+| Job | Machine | Résultat |
+| --- | --- | --- |
+| Lint et tests unitaires | `ubuntu-latest` | vert |
+| Tests d'intégration | `ubuntu-latest` + service PostgreSQL | vert |
+| Construire et publier l'image | `ubuntu-latest` | vert |
+| Déployer sur la machine cible | `self-hosted` | vert |
+
+Le job de déploiement affiche `/health répond 200 après 1 tentative(s)`, et la
+machine cible tourne bien l'image du commit qui a déclenché la pipeline. La
+boucle est fermée : un `git push` sur `main`, et l'application part en
+production sans qu'une seule commande soit tapée.
+
+Contrôle de fuite sur le log complet du run : aucune occurrence de
+`BEGIN OPENSSH`. La clé privée est passée par un agent SSH, en mémoire, et
+GitHub masque les valeurs des secrets. Le log affiche `IMAGE: ***/todo-api`,
+avec le pseudo remplacé par des astérisques.
+
+Une seule pipeline rouge de la journée était voulue, celle du commit
+`4596c48` : la régression volontaire, arrêtée par les tests d'intégration,
+avec `build` et `deploy` sautés. Une pipeline qui refuse de publier du code
+cassé fait exactement son travail.
+
 ## À venir
 
 - [ ] Restreindre les origines CORS pour la production
