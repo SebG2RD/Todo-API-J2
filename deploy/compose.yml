@@ -1,0 +1,66 @@
+# Stack de production, telle qu'elle vit sur la machine cible dans /srv/todo.
+#
+# Différence décisive avec docker-compose.yml : ce fichier ne construit rien.
+# Il tire une image déjà publiée, et la version lui est dictée de l'extérieur
+# par ${TAG}. Aucune ligne de code source n'existe sur la machine cible.
+#
+# La commande de déploiement tient alors en une ligne, jouée sur la cible :
+#   cd /srv/todo && IMAGE=<pseudo>/todo-api TAG=<sha du commit> docker compose up -d
+#
+# `docker compose up -d` compare l'état décrit ici à l'état réel de la machine
+# et ne remplace que ce qui a changé. Il est idempotent par construction : le
+# rejouer dix fois de suite laisse exactement un conteneur todo-api debout, là
+# où une séquence de `docker run` aurait planté sur un nom déjà pris.
+name: todo-prod
+
+services:
+  todo-api:
+    # Nom fixe : la pipeline, la procédure de déploiement et le script
+    # d'incident comptent tous les trois dessus pour viser le bon conteneur.
+    container_name: todo-api
+    image: ${IMAGE}:${TAG}
+    environment:
+      NODE_ENV: production
+      # DB_HOST vaut le nom du service, résolu par le réseau interne. La base
+      # ne publie aucun port : elle n'est joignable que d'ici.
+      DB_HOST: todo-db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "3000:3000"
+    depends_on:
+      todo-db:
+        condition: service_healthy
+    networks:
+      - todo-prod
+    restart: unless-stopped
+
+  todo-db:
+    container_name: todo-db
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - todo-pgdata:/var/lib/postgresql/data
+    # Sans ce garde-fou, l'API démarrerait pendant que Postgres s'initialise
+    # encore, et repartirait en boucle de reconnexion pour rien.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${DB_USER} -d $${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - todo-prod
+    restart: unless-stopped
+
+networks:
+  todo-prod:
+    name: todo-prod
+
+volumes:
+  todo-pgdata:
+    name: todo-pgdata
