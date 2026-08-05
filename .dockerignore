@@ -6,3 +6,10 @@ npm-debug.log*
 .DS_Store
 dist
 coverage
+
+# Supports de cours : 3 Mo qui n'ont rien à faire dans un contexte de build
+*.pdf
+
+# La clé PRIVÉE ne doit pas même transiter par le contexte de build.
+# deploy_key.pub, elle, y reste : Dockerfile.vm en a besoin.
+deploy_key
