@@ -7,7 +7,8 @@
     "start": "node src/index.js",
     "lint": "eslint .",
     "test": "jest tests/unit",
-    "test:integration": "jest tests/integration --runInBand"
+    "test:integration": "jest tests/integration --runInBand",
+    "migrate": "node scripts/migrate.js"
   },
   "repository": {
     "type": "git",
