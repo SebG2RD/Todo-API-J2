@@ -160,7 +160,13 @@ jobs:
         shell: bash
         run: |
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p /srv/todo"
-          scp -P "$DEPLOY_PORT" deploy/compose.yml "$DEPLOY_USER@$DEPLOY_HOST:/srv/todo/compose.yml"
+          # Tout le dossier deploy/ : le compose, la configuration de Prometheus
+          # et la définition du tableau de bord. Ces trois-là sont du code, et
+          # ils ne se modifient jamais directement sur la machine cible.
+          scp -P "$DEPLOY_PORT" -r deploy/. "$DEPLOY_USER@$DEPLOY_HOST:/srv/todo/"
+          # env.example n'a rien à faire en production : le vrai .env est déjà
+          # là-bas, posé une fois à la main, et il porte le mot de passe.
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "rm -f /srv/todo/env.example"
 
       # Le sha du commit devient la version déployée. Aucune ambiguïté possible
       # sur ce qui tourne : ce tag ne désigne que ce commit-là.
