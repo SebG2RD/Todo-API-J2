@@ -3,3 +3,12 @@ node_modules
 
 # Supports de cours : lus, pas versionnés
 *.pdf
+
+# Clés SSH de déploiement. Cette ligne est écrite AVANT que la paire existe :
+# une clé privée poussée par erreur ne se rattrape pas avec un commit de
+# suppression, git log garde tout. Seule la publique part dans l'image, et elle
+# y arrive par un COPY, pas par le dépôt.
+deploy_key
+deploy_key.pub
+*.pem
+id_ed25519*
