@@ -1,0 +1,18 @@
+# Indique à Grafana où trouver les tableaux de bord décrits en JSON. Le dossier
+# est monté depuis le dépôt : le tableau de bord est du code, il se relit dans
+# une pull request et se restaure d'un déploiement.
+apiVersion: 1
+
+providers:
+  - name: todo-api
+    orgId: 1
+    folder: ""
+    type: file
+    # Empêche qu'un clic malheureux dans l'interface supprime définitivement un
+    # tableau de bord que le dépôt décrit encore.
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
