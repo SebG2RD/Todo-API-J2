@@ -57,6 +57,46 @@ services:
       - todo-prod
     restart: unless-stopped
 
+  # La surveillance vit sur le même réseau que ce qu'elle surveille : c'est ce
+  # qui permet à Prometheus de joindre l'API par son nom de service, sans
+  # qu'aucun port supplémentaire ne soit publié pour ça.
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:v3.1.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - todo-prod
+    restart: unless-stopped
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:11.5.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Le tableau de bord doit être lisible par le camarade d'astreinte sans
+      # qu'on lui passe un mot de passe au téléphone à 3 h du matin.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      # La source de données et le tableau de bord sont provisionnés depuis des
+      # fichiers du dépôt : rien à cliquer, rien à refaire après un down -v.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - todo-prod
+    restart: unless-stopped
+
 networks:
   todo-prod:
     name: todo-prod
@@ -64,3 +104,7 @@ networks:
 volumes:
   todo-pgdata:
     name: todo-pgdata
+  prometheus-data:
+    name: prometheus-data
+  grafana-data:
+    name: grafana-data
