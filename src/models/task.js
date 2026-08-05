@@ -36,7 +36,7 @@ async function createTask({ description, status = DEFAULT_STATUS }) {
 }
 
 async function listTasks() {
-  const { rows } = await query("SELECT * FROM tasks ORDER BY creation_date");
+  const { rows } = await query("SELECT * FROM tasks ORDER BY created_at");
   return rows.map(toTask);
 }
 
