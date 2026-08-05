@@ -1,3 +1,5 @@
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
 const { Pool } = require("pg");
 const { httpError } = require("./middleware/errorHandler");
 
@@ -58,15 +60,12 @@ async function query(text, params) {
   }
 }
 
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS tasks (
-    id          UUID        PRIMARY KEY,
-    description TEXT        NOT NULL,
-    status      TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-  )
-`;
+// Le schéma vit dans db/schema.sql, pas dans une constante de ce fichier : la
+// même migration est ainsi rejouée par l'application au démarrage et par
+// `npm run migrate` avant les tests d'intégration. Deux copies du schéma
+// finiraient par diverger, et un test vert contre un schéma qui n'est pas celui
+// de la production ne prouve rien.
+const SCHEMA = readFileSync(join(__dirname, "..", "db", "schema.sql"), "utf8");
 
 // Postgres met quelques secondes à accepter des connexions après son démarrage.
 async function connectWithRetry({ attempts = 10, delayMs = 1000 } = {}) {
