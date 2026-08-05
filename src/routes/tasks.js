@@ -1,5 +1,6 @@
 const { Router } = require("express");
 const { httpError } = require("../middleware/errorHandler");
+const { tasksCreatedTotal } = require("../metrics");
 const {
   STATUSES,
   MAX_DESCRIPTION_LENGTH,
@@ -11,6 +12,17 @@ const {
 } = require("../models/task");
 
 const router = Router();
+
+// Express ne garde `req.baseUrl` que le temps de la traversée du routeur : il le
+// restaure à la sortie, y compris quand une erreur remonte vers le gestionnaire
+// de l'application. Or l'étiquette de métrique est posée sur `finish`, donc
+// après cette restauration. Sans cette ligne, la route serait comptée « /:id »
+// au lieu de « /api/tasks/:id », et deux routeurs différents se mélangeraient
+// dans la même série.
+router.use((req, res, next) => {
+  req.metricsBaseUrl = req.baseUrl;
+  next();
+});
 
 // Seuls description et status sont lus : le client ne peut pas fabriquer son
 // propre id ou son propre createdAt.
@@ -68,6 +80,9 @@ router.post("/", async (req, res) => {
   }
 
   const task = await createTask(input);
+  // Incrémenté après l'écriture, jamais avant : une création qui échoue en base
+  // ne doit pas gonfler le compteur métier.
+  tasksCreatedTotal.inc();
   res.status(201).location(`/api/tasks/${task.id}`).json(task);
 });
 
