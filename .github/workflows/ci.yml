@@ -35,9 +35,62 @@ jobs:
       - name: Tests unitaires
         run: npm test
 
+  test-integration:
+    name: Tests d'intégration contre un vrai PostgreSQL
+    runs-on: ubuntu-latest
+    # Un conteneur annexe, lancé à côté du job et détruit avec lui. Même
+    # principe qu'un docker-compose, sauf que GitHub le crée et le supprime
+    # tout seul. La base repart vide à chaque run : un test qui dépend d'un
+    # reste de la veille n'est pas reproductible.
+    services:
+      postgres:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_DB: todo_test
+          POSTGRES_USER: todo_test_user
+          POSTGRES_PASSWORD: todo_test_password
+        ports:
+          - 5432:5432
+        # Sans ce contrôle de santé, les tests démarrent parfois pendant que
+        # Postgres s'initialise encore, et échouent une fois sur trois sans
+        # qu'on comprenne pourquoi.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Le conteneur de service partage le réseau du job : on le joint par
+      # localhost, pas par son nom comme dans un docker-compose.
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: todo_test
+      DB_USER: todo_test_user
+      DB_PASSWORD: todo_test_password
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      # Le schéma doit exister avant le premier test, sinon l'échec porte sur
+      # une table absente et non sur le comportement testé.
+      - name: Rejouer la migration
+        run: npm run migrate
+
+      - name: Tests d'intégration
+        run: npm run test:integration
+
   build:
     name: Construire et publier l'image
-    needs: [test]
+    # Les deux filets doivent tenir avant qu'une image ne soit fabriquée : un
+    # test unitaire vert ne dit rien du contrat entre le code et sa vraie base.
+    needs: [test, test-integration]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
