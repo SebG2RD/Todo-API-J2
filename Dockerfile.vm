@@ -1,0 +1,36 @@
+# La machine de production, en maquette.
+#
+# Une vraie machine cible coûte un compte chez un hébergeur. On la remplace par
+# un conteneur qui en présente toutes les faces visibles depuis la pipeline :
+# une adresse, un port, un utilisateur, une clé, et un daemon Docker au bout.
+# Ce n'est pas une vraie machine, mais du point de vue du job de déploiement,
+# rien ne les distingue.
+#
+# Ce qui compte ici, c'est l'isolation : le Docker de cette machine ne voit
+# aucun conteneur du poste de développement, et réciproquement. Une panne en
+# « production » ne touchera donc jamais l'environnement de travail.
+FROM docker:28-dind
+
+# openssh-server : le programme qui écoute les connexions entrantes.
+# curl : pour interroger /health depuis la machine cible pendant un incident.
+# ssh-keygen -A fabrique les clés d'hôte, sans lesquelles sshd refuse de démarrer.
+RUN apk add --no-cache openssh-server curl \
+    && ssh-keygen -A
+
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+
+# La clé PUBLIQUE du déploiement : le cadenas posé sur la porte. La privée reste
+# du côté de la pipeline, en secret de dépôt, et n'entre jamais dans cette image.
+COPY deploy_key.pub /root/.ssh/authorized_keys
+RUN chmod 600 /root/.ssh/authorized_keys
+
+# Le dossier où vivront compose.yml, .env et la configuration de supervision.
+# Aucune ligne de code source n'arrive ici : seulement des images et des ordres.
+RUN mkdir -p /srv/todo
+
+# sshd démarre AVANT le daemon Docker : dockerd-entrypoint.sh ne rend jamais la
+# main, donc tout ce qui est écrit après lui ne s'exécuterait jamais.
+RUN printf '#!/bin/sh\n/usr/sbin/sshd\nexec dockerd-entrypoint.sh "$@"\n' > /start.sh \
+    && chmod +x /start.sh
+
+ENTRYPOINT ["/start.sh"]
