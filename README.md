@@ -27,15 +27,22 @@ conteneurs.
 
 ### Routes
 
-| Méthode  | Route            | Rôle                      | Réponse                       |
-| -------- | ---------------- | ------------------------- | ----------------------------- |
-| `GET`    | `/`              | Message d'accueil         | `200` `{ message }`           |
-| `GET`    | `/health`        | Vérifier que l'API répond | `200` `{ status, timestamp }` |
-| `POST`   | `/api/tasks`     | Créer une tâche           | `201` + la tâche créée        |
-| `GET`    | `/api/tasks`     | Lister toutes les tâches  | `200` + tableau de tâches     |
-| `GET`    | `/api/tasks/:id` | Voir une tâche            | `200` + la tâche              |
-| `PUT`    | `/api/tasks/:id` | Modifier une tâche        | `200` + la tâche modifiée     |
-| `DELETE` | `/api/tasks/:id` | Supprimer une tâche       | `204` sans contenu            |
+| Méthode  | Route            | Rôle                         | Réponse                       |
+| -------- | ---------------- | ---------------------------- | ----------------------------- |
+| `GET`    | `/`              | Message d'accueil            | `200` `{ message }`           |
+| `GET`    | `/health`        | Vérifier que l'API répond    | `200` `{ status, timestamp }` |
+| `GET`    | `/metrics`       | Mesures au format Prometheus | `200` texte brut              |
+| `POST`   | `/api/tasks`     | Créer une tâche              | `201` + la tâche créée        |
+| `GET`    | `/api/tasks`     | Lister toutes les tâches     | `200` + tableau de tâches     |
+| `GET`    | `/api/tasks/:id` | Voir une tâche               | `200` + la tâche              |
+| `PUT`    | `/api/tasks/:id` | Modifier une tâche           | `200` + la tâche modifiée     |
+| `DELETE` | `/api/tasks/:id` | Supprimer une tâche          | `204` sans contenu            |
+
+`/health` ne touche jamais la base : il répond `200` même quand PostgreSQL est
+mort. C'est délibéré, pour qu'une panne de base ne fasse pas passer l'API pour
+morte et ne déclenche pas de redémarrages inutiles. La conséquence pratique est
+importante en astreinte : **seul `/api/tasks` prouve que toute la chaîne
+fonctionne**.
 
 Le service de statistiques, sur le port 8000 :
 
@@ -228,31 +235,60 @@ mapping de port change avec `API_PORT`.
 
 ```text
 Todo API/
+├── .github/workflows/
+│   ├── ci.yml                  # test → test-integration → build → deploy
+│   └── verifier-runner.yml     # Preuve manuelle que le runner tourne bien chez moi
 ├── src/
 │   ├── app.js                  # Câblage Express : middlewares, routes, erreurs
 │   ├── index.js                # Point d'entrée : attend la base, puis écoute
 │   ├── db.js                   # Pool PostgreSQL, schéma, erreurs de connexion
+│   ├── metrics.js              # Registre Prometheus, compteurs, histogramme
 │   ├── models/
 │   │   └── task.js             # Modèle Task et requêtes SQL
 │   ├── routes/
 │   │   └── tasks.js            # Les 5 routes REST montées sur /api/tasks
 │   └── middleware/
 │       └── errorHandler.js     # Erreurs vers réponses JSON propres
+├── db/
+│   └── schema.sql              # Le schéma, source unique : app, CI et migration
+├── scripts/
+│   ├── migrate.js              # Rejoue db/schema.sql, avant les tests d'intégration
+│   └── incident.sh             # Tire une panne au hasard parmi cinq, sur la cible
+├── deploy/                     # Ce qui part sur la machine cible, et rien d'autre
+│   ├── compose.yml             # Stack de prod : API, base, Prometheus, Grafana
+│   ├── prometheus.yml          # Cibles et fréquence de collecte
+│   ├── env.example             # Modèle du .env qui vit sur la cible, jamais versionné
+│   └── grafana/
+│       ├── dashboards/
+│       │   └── todo-api.json   # Le tableau de bord des quatre signaux
+│       └── provisioning/       # Source de données et déclaration des dashboards
+├── docs/
+│   └── PROCEDURE_DEPLOIEMENT.md  # Le document qu'on suit à 3 h du matin
 ├── stats_api/
 │   ├── main.py                 # Service FastAPI : /health et /stats
 │   ├── requirements.txt        # Dépendances Python épinglées
 │   ├── Dockerfile              # Image du service Python
 │   └── .dockerignore
-├── tests/                      # Tests automatisés (à écrire)
+├── tests/
+│   ├── unit/                   # 26 tests, sans base : mocks et validation
+│   └── integration/            # 12 tests contre un vrai PostgreSQL
 ├── Dockerfile                  # Image de l'API Node, multi-stage
+├── Dockerfile.vm               # La machine cible en maquette : Docker + sshd
 ├── docker-compose.yml          # Stack de développement, images construites en local
 ├── docker-compose.prod.yml     # Stack de production, images tirées du registry
+├── docker-compose.test.yml     # Base jetable pour les tests d'intégration en local
+├── eslint.config.js            # Le premier filet de la pipeline
 ├── .dockerignore               # Fichiers exclus du contexte de build
 ├── .env.example                # Modèle de configuration, commité
-├── .gitignore                  # node_modules et .env
+├── .gitignore                  # node_modules, .env, clés SSH, PDF
 ├── package.json
 └── package-lock.json
 ```
+
+Ni `deploy_key`, ni `.env`, ni aucun mot de passe n'entre dans le dépôt. La
+ligne du `.gitignore` qui exclut la clé privée a été écrite **avant** que la
+paire existe : une clé poussée par erreur ne se rattrape pas avec un commit de
+suppression, `git log` garde tout.
 
 `app.js` et `index.js` sont séparés volontairement. `app.js` configure l'application et
 l'exporte sans ouvrir de port, ce qui permettra à un test de l'importer directement.
@@ -260,13 +296,30 @@ l'exporte sans ouvrir de port, ce qui permettra à un test de l'importer directe
 
 ## Scripts npm
 
-| Commande    | Effet                                        |
-| ----------- | -------------------------------------------- |
-| `npm start` | Démarre le serveur (`node src/index.js`)     |
-| `npm test`  | Aucun test configuré pour l'instant (échoue) |
+| Commande                   | Effet                                                          |
+| -------------------------- | -------------------------------------------------------------- |
+| `npm start`                | Démarre le serveur (`node src/index.js`)                       |
+| `npm run lint`             | ESLint sur tout le dépôt                                       |
+| `npm test`                 | 26 tests unitaires, sans base                                  |
+| `npm run test:integration` | 12 tests contre un vrai PostgreSQL                             |
+| `npm run migrate`          | Rejoue `db/schema.sql` sur la base pointée par l'environnement |
 
 `npm start` hors conteneur suppose une base joignable : la stack Compose ne publie pas
 le port de Postgres, il faut donc l'ajouter temporairement pour travailler ainsi.
+
+Pour lancer les tests d'intégration en local, une base jetable suffit :
+
+```bash
+docker compose -f docker-compose.test.yml up -d
+DB_HOST=localhost DB_PORT=5433 DB_NAME=todo_test \
+DB_USER=todo_test_user DB_PASSWORD=todo_test_password \
+  npm run migrate && npm run test:integration
+docker compose -f docker-compose.test.yml down -v
+```
+
+Le `-v` final compte : la base ne survit pas d'une session à l'autre. Un test
+qui dépend d'une base « à peu près propre parce qu'on n'y a pas touché depuis
+hier » n'est pas reproductible, et ne prouve donc rien.
 
 ## Stack technique
 
@@ -279,10 +332,96 @@ le port de Postgres, il faut donc l'ajouter temporairement pour travailler ainsi
 - **FastAPI** et **uvicorn** : le service de statistiques en Python
 - **Adminer** : interface web d'administration de la base
 - **Docker** et **Docker Compose** : construction des images et orchestration
+- **prom-client** : produit la page `/metrics` que Prometheus vient lire
+- **Prometheus** : collecte les mesures toutes les 5 secondes
+- **Grafana** : les affiche, source de données et tableau de bord provisionnés
+  par fichier
+- **Jest** et **Supertest** : tests unitaires et tests d'intégration HTTP
+- **ESLint** : le premier filet de la pipeline
+- **GitHub Actions** : lint, tests, image, déploiement, avec un runner
+  self-hosted pour la seule étape qui doit joindre une machine privée
 
 **CORS ?** *Cross-Origin Resource Sharing*. La règle du navigateur qui empêche, par
 défaut, une page servie par un domaine d'appeler une API hébergée sur un autre domaine.
 Le middleware sert à ouvrir explicitement cette porte quand c'est voulu.
+
+## La chaîne de livraison
+
+Un `git push` sur `main` suffit. Personne ne tape de commande, et l'application
+part en production toute seule.
+
+```text
+push sur main
+   ├─ test               ubuntu-latest    lint + 26 tests unitaires
+   ├─ test-integration   ubuntu-latest    12 tests contre un PostgreSQL jetable
+   ├─ build              ubuntu-latest    image taguée au sha, poussée sur Docker Hub
+   └─ deploy             self-hosted      SSH → docker compose up -d → curl /health
+```
+
+Les trois premiers jobs tournent sur des machines fournies par GitHub, neuves à
+chaque exécution. Seul `deploy` tourne sur un runner **self-hosted**, et c'est
+une décision d'architecture, pas un contournement : la machine cible vit sur le
+poste de travail, derrière une box, sans adresse publique. Un runner hébergé
+dans un centre de données n'a aucun moyen de la joindre. On place donc
+l'exécutrice du bon côté de la porte.
+
+Une branche de travail déclenche les deux jobs de test et s'arrête là : rien
+n'est publié, rien n'est déployé, et surtout aucun code non fusionné ne
+s'exécute sur la machine personnelle.
+
+### La machine cible
+
+Une vraie machine de production demande un compte chez un hébergeur. Elle est
+remplacée par une maquette, décrite dans `Dockerfile.vm` : un conteneur qui
+embarque son propre daemon Docker et un serveur SSH. Du point de vue de la
+pipeline, rien ne la distingue d'un vrai serveur — une adresse, un port, un
+utilisateur, une clé, un Docker au bout. Et son Docker ne voit aucun conteneur
+du poste de travail : une panne en « production » ne touche jamais
+l'environnement de développement.
+
+```bash
+ssh-keygen -t ed25519 -N "" -f deploy_key -C "deploy@todo-api"
+docker build -f Dockerfile.vm -t vm-prod .
+docker run -d --privileged --name vm-prod \
+  -p 2222:22 -p 3000:3000 -p 9090:9090 -p 3001:3001 \
+  -v vm-prod-data:/var/lib/docker vm-prod
+```
+
+Le volume `vm-prod-data` garde images et conteneurs entre deux redémarrages.
+Le compte utilisé est `root` : sur une vraie machine, ce serait un compte de
+service appartenant au groupe `docker` et rien de plus, sans `sudo`. La
+simplification est assumée, la maquette étant jetable et injoignable depuis
+l'extérieur.
+
+### Secrets attendus par la pipeline
+
+| Secret | Rôle |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Compte du registry, sert aussi à composer le nom de l'image |
+| `DOCKERHUB_TOKEN` | Jeton d'accès Docker Hub, portée Read & Write |
+| `DEPLOY_SSH_KEY` | Contenu de `deploy_key`, chargé dans un agent SSH, jamais écrit sur le disque du runner |
+| `DEPLOY_HOST` | `localhost` |
+| `DEPLOY_PORT` | `2222` |
+| `DEPLOY_USER` | `root` |
+
+### Surveillance
+
+Prometheus et Grafana vivent dans le même `compose.yml` que l'API, sur le même
+réseau : Prometheus joint l'application par son **nom de service**, sans qu'un
+seul port soit publié pour ça.
+
+- Grafana : <http://localhost:3001>, tableau de bord **Todo API — les quatre
+  signaux**, lecture anonyme activée pour qu'un camarade d'astreinte n'ait pas
+  à réclamer un mot de passe.
+- Prometheus : <http://localhost:9090>, `scrape_interval` de 5 s.
+
+La source de données et le tableau de bord sont provisionnés par fichier, donc
+versionnés : ils survivent à un `docker compose down -v` et se relisent dans
+une pull request.
+
+En cas de panne, la marche à suivre est dans
+[`docs/PROCEDURE_DEPLOIEMENT.md`](docs/PROCEDURE_DEPLOIEMENT.md), avec les
+signatures mesurées de chaque panne connue et la commande de retour arrière.
 
 ## Journal de bord
 
