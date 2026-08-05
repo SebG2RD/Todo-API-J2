@@ -1,0 +1,46 @@
+name: Vérifier le runner
+
+# Déclenchement manuel uniquement : ce workflow ne sert qu'à répondre à une
+# question, « le job tourne-t-il bien sur ma machine et pas dans le cloud ? ».
+# Le lancer à chaque push n'apprendrait rien de plus.
+on:
+  workflow_dispatch:
+
+jobs:
+  chez-moi:
+    name: Ce que voit le runner self-hosted
+    runs-on: self-hosted
+    steps:
+      # shell: bash sur un runner Windows utilise le bash fourni par Git for
+      # Windows. Sans cette ligne, les steps `run` partiraient en PowerShell.
+      - name: Identité de la machine
+        shell: bash
+        run: hostname
+
+      # Un runner hébergé par GitHub afficherait une liste vide : il n'a ni la
+      # machine cible, ni aucun conteneur de développement.
+      - name: Conteneurs visibles depuis ce runner
+        shell: bash
+        run: docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+
+      # La preuve qui compte : la machine cible est joignable d'ici, sur un port
+      # que le cloud de GitHub n'atteindrait jamais.
+      - name: La machine cible répond-elle sur son port SSH
+        shell: bash
+        run: |
+          if docker inspect -f '{{.State.Running}}' vm-prod 2>/dev/null | grep -q true; then
+            echo "vm-prod tourne, port 2222 exposé sur cette machine"
+          else
+            echo "vm-prod est arrêtée : la démarrer avant tout déploiement"
+            exit 1
+          fi
+
+  chez-github:
+    name: Ce que voit un runner hébergé, pour comparaison
+    runs-on: ubuntu-latest
+    steps:
+      - name: Identité de la machine
+        run: hostname
+
+      - name: Conteneurs visibles depuis ce runner
+        run: docker ps --format '{{.Names}}\t{{.Status}}' && echo "(liste vide attendue)"
