@@ -1,0 +1,68 @@
+# Stack de production : les images viennent du registry, aucun build local.
+# Ce fichier et un .env suffisent à démarrer, sans une ligne de code source.
+name: todo-api
+
+services:
+  db:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - todo-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    image: ${REGISTRY_USER}/todo-api:${IMAGE_TAG:-1.0.0}
+    environment:
+      NODE_ENV: production
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - todo-network
+    restart: unless-stopped
+
+  stats-api:
+    image: ${REGISTRY_USER}/stats-api:${IMAGE_TAG:-1.0.0}
+    env_file:
+      - .env
+    ports:
+      - "${STATS_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - todo-network
+    restart: unless-stopped
+
+  adminer:
+    image: adminer:5.4.0
+    ports:
+      - "${ADMINER_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - todo-network
+    restart: unless-stopped
+
+networks:
+  todo-network:
+    name: todo-network
+
+volumes:
+  pgdata:
+    name: todo_pgdata
