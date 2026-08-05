@@ -1,0 +1,64 @@
+name: CI
+
+# Toute branche est vérifiée, seul main publie. La distinction se joue plus bas,
+# sur le `if:` du job build : rien ne part sur Docker Hub depuis une branche de
+# travail, même si ses tests sont verts.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/todo-api
+
+jobs:
+  test:
+    name: Lint et tests unitaires
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      # npm ci et pas npm install : le verrou fait foi, la CI n'a pas le droit
+      # de résoudre une version différente de celle testée en local.
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Linter
+        run: npm run lint
+
+      - name: Tests unitaires
+        run: npm test
+
+  build:
+    name: Construire et publier l'image
+    needs: [test]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Se connecter à Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Le tag est le sha du commit, jamais latest : une image ainsi nommée ne
+      # sera écrasée par aucun build suivant, et le retour arrière se résume à
+      # redéployer un tag qui existe encore.
+      - name: Construire et pousser
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
