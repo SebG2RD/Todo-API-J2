@@ -37,26 +37,47 @@ const tasksCreatedTotal = new client.Counter({
 
 // Seconde métrique métier : l'état réel de la base, pas un cumul. C'est un
 // gauge, puisque la valeur monte et descend au gré des suppressions.
-// La valeur est relue à chaque scrape, dans le callback ci-dessous.
 const tasksInDatabase = new client.Gauge({
   name: "todo_tasks_in_database",
   help: "Nombre de tâches actuellement présentes en base",
   registers: [register],
-  async collect() {
+});
+
+// Cette valeur est rafraîchie en tâche de fond, JAMAIS pendant le scrape.
+//
+// La première version interrogeait la base dans un callback `collect()` de
+// prom-client, donc à chaque lecture de /metrics. Mesuré en coupant la base :
+// la requête attendait les 3 s de connectionTimeoutMillis, /metrics dépassait
+// le scrape_timeout de Prometheus, et `up` tombait à 0 alors que
+// l'application répondait encore parfaitement sur /health. Autrement dit, la
+// supervision devenait aveugle exactement au moment où elle servait, et
+// affichait « application morte » pour une panne de base.
+//
+// En sortant la requête du chemin du scrape, /metrics ne dépend plus de la
+// base : `up` reste à 1, et c'est l'explosion des 503 sur http_requests_total
+// qui signale la panne. Deux pannes différentes, deux signatures différentes.
+function demarrerCollecteMetier({ intervalleMs = 10000 } = {}) {
+  const rafraichir = async () => {
     // Chargé ici et pas en tête de fichier : src/db.js et src/metrics.js
     // s'appelleraient mutuellement au chargement sinon.
     const { query } = require("./db");
     try {
       const { rows } = await query("SELECT count(*)::int AS n FROM tasks");
-      this.set(rows[0].n);
+      tasksInDatabase.set(rows[0].n);
     } catch {
-      // Base injoignable : /metrics doit répondre quand même. Sans ce filet,
-      // une panne de base rendrait Prometheus aveugle au moment précis où on a
-      // le plus besoin de lui. Le gauge garde sa dernière valeur connue, et
-      // c'est l'explosion des 503 sur http_requests_total qui signale la panne.
+      // Base injoignable : le gauge garde sa dernière valeur connue plutôt que
+      // de faire échouer la collecte. Une valeur figée se repère à l'œil sur un
+      // graphique ; un /metrics muet ne se repère pas du tout.
     }
-  },
-});
+  };
+
+  rafraichir();
+  const minuteur = setInterval(rafraichir, intervalleMs);
+  // Sans unref, ce minuteur empêcherait le process de se terminer, et un
+  // `docker stop` attendrait le délai de grâce complet à chaque déploiement.
+  minuteur.unref();
+  return minuteur;
+}
 
 // Le nom de la route déclarée, jamais l'URL réelle. « /api/tasks/:id » prend
 // une seule série ; « /api/tasks/0557ad6b-... » en prendrait une par tâche, et
@@ -107,4 +128,5 @@ module.exports = {
   metricsMiddleware,
   tasksCreatedTotal,
   tasksInDatabase,
+  demarrerCollecteMetier,
 };
