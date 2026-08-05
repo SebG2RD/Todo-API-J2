@@ -1,0 +1,27 @@
+# Configuration de Prometheus, versionnée dans le dépôt comme le reste du code.
+# Elle part sur la machine cible par la pipeline, et ne se modifie jamais
+# directement en production : une correction faite à la main sur le serveur
+# serait écrasée au déploiement suivant, sans que personne ne comprenne pourquoi.
+
+global:
+  # Cinq secondes, plus court que les quinze habituelles : pendant un incident
+  # de quelques minutes, une mesure toutes les quinze secondes laisse trop peu
+  # de points pour voir la forme de la panne.
+  scrape_interval: 5s
+  scrape_timeout: 3s
+
+scrape_configs:
+  - job_name: todo-api
+    # C'est ce nom qu'on retrouve dans le label `job` de chaque métrique, et
+    # dans la requête up{job="todo-api"} du panneau Disponibilité.
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["todo-api:3000"]
+        labels:
+          environnement: production
+
+  # Prometheus se scrape lui-même : si ce job disparaît des cibles, c'est le
+  # collecteur qui est en cause, pas l'application.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
