@@ -1,0 +1,25 @@
+# La source de données, provisionnée par fichier plutôt que cliquée dans
+# l'interface : elle survit à un `docker compose down -v`, et elle est la même
+# sur toutes les machines.
+#
+# L'erreur qui fait perdre un quart d'heure à tout le monde : écrire
+# localhost:9090 ici. Depuis le conteneur Grafana, localhost désigne Grafana
+# lui-même, pas Prometheus. C'est le nom du service sur le réseau Docker qui
+# fait foi, et rien d'autre.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # uid fixe : le JSON du tableau de bord y fait référence. Sans lui, Grafana
+    # en tire un au hasard et les panneaux arrivent vides après un redéploiement.
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Doit correspondre au scrape_interval de prometheus.yml, sinon Grafana
+      # calcule des taux sur des fenêtres plus courtes que l'intervalle réel et
+      # affiche des trous dans les courbes.
+      timeInterval: 5s
