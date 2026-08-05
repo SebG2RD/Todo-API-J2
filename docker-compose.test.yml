@@ -1,0 +1,29 @@
+# Une base jetable, pour rejouer en local ce que la pipeline fait toute seule
+# avec un conteneur de service.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   npm run test:integration
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Le -v final compte : les données ne survivent pas d'une session à l'autre. Un
+# test qui dépend d'une base « à peu près propre parce qu'on n'y a pas touché
+# depuis hier » n'est pas reproductible, et ne prouve donc rien.
+name: todo-test
+
+services:
+  db-test:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: todo_test
+      POSTGRES_USER: todo_test_user
+      POSTGRES_PASSWORD: todo_test_password
+    # Publié, contrairement à la base de développement : les tests tournent sur
+    # l'hôte, hors conteneur, et doivent pouvoir joindre la base.
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U todo_test_user -d todo_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    # Pas de volume nommé : la base meurt avec le conteneur, c'est le but.
