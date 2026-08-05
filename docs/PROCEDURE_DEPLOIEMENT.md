@@ -109,6 +109,7 @@ SHA=<sha du commit à déployer>
 # 4.2 — Vérifier que l'image existe AVANT de toucher à la production.
 docker manifest inspect nghtmre/todo-api:$SHA > /dev/null && echo "image trouvée"
 ```
+
 **Vérification** : la commande affiche `image trouvée`. Si elle répond
 `manifest unknown`, le tag n'existe pas : ne pas continuer, reprendre au 4.1.
 
@@ -118,6 +119,7 @@ $SSH "mkdir -p /srv/todo"
 scp -i deploy_key -P 2222 -r deploy/. root@localhost:/srv/todo/
 $SSH "rm -f /srv/todo/env.example"
 ```
+
 **Vérification** : `$SSH "ls /srv/todo"` liste `compose.yml`, `prometheus.yml`,
 `grafana` et `.env`. Si `.env` manque, voir § 7.4.
 
@@ -125,6 +127,7 @@ $SSH "rm -f /srv/todo/env.example"
 # 4.4 — Déployer.
 $SSH "cd /srv/todo && IMAGE='nghtmre/todo-api' TAG='$SHA' docker compose up -d"
 ```
+
 **Vérification** : la sortie affiche `Container todo-api Started` ou
 `Recreated`. Le code de sortie de la commande est `0` (`echo $?`).
 
@@ -134,6 +137,7 @@ sleep 12
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/health
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks
 ```
+
 **Vérification** : les deux répondent `200`. `/health` seul ne suffit pas : il
 ne touche pas la base, et répond `200` même quand la base est morte.
 
@@ -141,6 +145,7 @@ ne touche pas la base, et répond `200` même quand la base est morte.
 # 4.6 — Confirmer la version réellement en place.
 $SSH "docker inspect -f '{{.Config.Image}}' todo-api"
 ```
+
 **Vérification** : le sha affiché est bien celui du 4.1.
 
 ---
@@ -189,28 +194,59 @@ destructive n'existe, le retour arrière est donc sûr.
 Ces quatre signatures ont été mesurées sur cette machine, sous une charge de
 ~3 requêtes/seconde. Elles suffisent à identifier la panne sans se connecter.
 
-| # | Panne | `up` | Taux 5xx | p95 | Ce qui la distingue |
-| --- | --- | --- | --- | --- | --- |
-| 1 | `todo-api` arrêté | **0** en 8 s | pas de données | pas de données | Le seul cas où `up` tombe. Panneau Disponibilité en `HORS SERVICE`. |
-| 2 | `todo-db` arrêté | 1 | **61 %** | **4,8 s** | Erreurs **et** latence. Le p95 colle aux 3 s du timeout du pool. |
-| 3 | Réseau coupé entre l'API et la base | 1 | élevé | élevé | Même image que la 2 sur le tableau de bord. C'est `docker ps` qui tranche : ici `todo-db` est **Up**. |
-| 4 | `todo-api` relancé sans sa configuration | 1 | élevé | élevé | Comme la 2, mais `docker inspect` montre un conteneur **sans** le réseau `todo-prod`. |
-| 5 | Machine saturée (conteneurs dévoreurs de CPU) | 1 | **0 %** | **83 ms** au lieu de 21 | Le seul cas où la latence monte **sans aucune erreur**. |
-| — | Régression de code déployée | 1 | **33 %** | **24 ms** | Erreurs sans latence : ça échoue vite. À l'inverse exact de la panne 2. |
+Toutes ces valeurs ont été relevées en rejouant chaque panne, pas déduites.
+Le premier tri se fait sur `up`, et il partage les pannes en deux familles.
 
-Deux règles de lecture qui font gagner du temps :
+### Famille A — `up` vaut 0, et `curl` depuis le poste répond `000`
 
-- **`up` à 0** ⇒ le conteneur ne tourne plus ou ne répond plus du tout. Une
-  seule famille de causes.
-- **`up` à 1 avec des erreurs** ⇒ le conteneur tourne mais quelque chose
-  derrière lui est cassé. Le **p95** tranche : lent (secondes) = la base ou le
-  réseau ; rapide (millisecondes) = le code.
+`000` n'est pas un code HTTP : c'est `curl` qui n'a même pas obtenu de
+connexion. Trois pannes différentes donnent cette même image, et **seul
+`docker ps` les sépare**. C'est la commande à taper en premier.
 
-Attention à un piège vérifié : `docker ps` affiche `todo-api` en **`healthy`**
-dans les pannes 2, 3, 4, 5 **et** en cas de régression de code. Le `HEALTHCHECK`
-interroge `/health`, qui ne touche pas la base — c'est volontaire, pour qu'une
-panne de base ne déclenche pas des redémarrages inutiles. **Ne jamais conclure
-« tout va bien » sur un `healthy`.**
+```bash
+$SSH "docker ps -a --format '{{.Names}}\t{{.Status}}'"
+```
+
+| # | Panne | Ce qu'affiche `docker ps -a` pour `todo-api` | Confirmation |
+| --- | --- | --- | --- |
+| 1 | `todo-api` arrêté | `Exited (137)` ou `Exited (0)` | `docker logs` s'arrête net, sans erreur |
+| 3 | Réseau coupé entre l'API et la base | **`Up (healthy)`** | `docker inspect -f '{{.NetworkSettings.Networks}}' todo-api` renvoie une liste **vide**, et `docker port todo-api` n'affiche **rien** |
+| 4 | `todo-api` relancé sans sa configuration | `Exited (1)` | `docker logs todo-api` affiche `Démarrage impossible : Variable d'environnement manquante : DB_HOST` |
+
+La panne 3 est la plus déroutante des trois : le conteneur tourne, se déclare
+`healthy`, et pourtant plus rien ne l'atteint. Détaché de son réseau, il perd
+aussi la publication de son port 3000 — d'où le `000` côté poste et le `up` à 0
+côté Prometheus, qui ne le joint plus non plus.
+
+Délai de détection mesuré : `up` passe à 0 en **8 secondes** après l'arrêt du
+conteneur, pour un `scrape_interval` de 5 s.
+
+### Famille B — `up` vaut 1, le service répond mais quelque chose cloche
+
+Ici, c'est le **p95** qui tranche, pas le taux d'erreur.
+
+| # | Panne | Taux 5xx | p95 | Lecture |
+| --- | --- | --- | --- | --- |
+| 2 | `todo-db` arrêté | **61 %** | **4,8 s** | Erreurs **et** latence. Le p95 colle aux 3 s de `connectionTimeoutMillis` : ça échoue **lentement**, donc en aval. |
+| 5 | Machine saturée (conteneurs dévoreurs de CPU) | **0 %** | **83 ms** au lieu de 21 | Latence multipliée par 4 **sans une seule erreur**. Le seul cas de cette forme. |
+| — | Régression de code déployée | **33 %** | **24 ms** | Erreurs **sans** latence : ça échoue **vite**, donc dans le code. L'inverse exact de la panne 2. |
+
+Pour la 2, vérifier `docker ps` : `todo-db` y est `Exited`. Pour la 5,
+`docker ps` liste des conteneurs `hog-*` qui n'ont rien à faire là.
+
+### Le piège à connaître avant d'ouvrir un terminal
+
+`docker ps` affiche `todo-api` en **`healthy`** dans les pannes **2, 3 et 5**,
+et aussi quand une régression de code est en production. Le `HEALTHCHECK`
+interroge `/health` depuis l'intérieur du conteneur, et `/health` ne touche pas
+la base — c'est délibéré, pour qu'une panne de base ne déclenche pas des
+redémarrages en boucle. **Un `healthy` ne prouve rien d'autre que « le process
+Node répond à lui-même ».** La seule commande qui prouve que le service marche
+vraiment est celle qui traverse toute la chaîne :
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks   # doit répondre 200
+```
 
 ### Réparations
 
@@ -249,6 +285,7 @@ La clé privée n'est pas la bonne, ou la publique n'est plus sur la machine.
 ssh-keygen -y -f deploy_key                  # empreinte de la clé locale
 $SSH "cat /root/.ssh/authorized_keys"        # ce que la machine accepte
 ```
+
 Les deux lignes doivent être identiques. Si `deploy_key` a été perdue, la
 machine cible doit être reconstruite (§ 7.5) : il n'y a pas d'autre porte.
 
@@ -262,6 +299,7 @@ docker start vm-prod
 sleep 30      # le daemon Docker interne met ~25 s à accepter des connexions
 $SSH "docker ps"
 ```
+
 **Vérification** : les quatre conteneurs remontent seuls, grâce au
 `restart: unless-stopped`. Vérifié après un redémarrage complet du poste.
 
@@ -272,6 +310,7 @@ Le runner self-hosted n'écoute plus.
 ```bash
 gh api repos/<compte>/<dépôt>/actions/runners --jq '.runners[] | "\(.name) \(.status)"'
 ```
+
 S'il est `offline`, relancer l'agent depuis son dossier d'installation
 (`C:\Users\<vous>\actions-runner`) avec `run.cmd`, et attendre `Listening for
 Jobs`. Compter jusqu'à 2 minutes : une ancienne session peut encore tenir la
@@ -286,6 +325,7 @@ part en boucle de redémarrage.
 $SSH "cat > /srv/todo/.env" < deploy/env.example
 $SSH "vi /srv/todo/.env && chmod 600 /srv/todo/.env"
 ```
+
 **Vérification** : `$SSH "cut -d= -f1 /srv/todo/.env"` liste `DB_NAME`,
 `DB_USER`, `DB_PASSWORD`. Ne jamais afficher le fichier entier dans un
 terminal partagé.
@@ -300,6 +340,7 @@ docker run -d --privileged --name vm-prod \
   -p 2222:22 -p 3000:3000 -p 9090:9090 -p 3001:3001 \
   -v vm-prod-data:/var/lib/docker vm-prod
 ```
+
 Puis refaire le § 7.4, mettre à jour le secret `DEPLOY_SSH_KEY`
 (`gh secret set DEPLOY_SSH_KEY < deploy_key`), et redéployer (§ 4).
 
@@ -313,6 +354,7 @@ autre nom.
 $SSH "docker ps --format '{{.Names}}\t{{.Ports}}' | grep 3000"
 $SSH "docker rm -f <le nom affiché>"
 ```
+
 **Vérification** : `$SSH "docker ps --format '{{.Ports}}' | grep -c 3000"`
 répond `0` avant de relancer le § 4.4.
 
