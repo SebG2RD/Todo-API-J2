@@ -1,0 +1,30 @@
+# La porte d'entrée du cluster.
+#
+# Jusqu'ici, seul un kubectl port-forward permettait d'atteindre l'API depuis
+# l'extérieur : une commande à retaper à chaque fois, et jamais ce qu'un vrai
+# utilisateur ferait. Traefik, le contrôleur d'entrée que K3s embarque, écoute
+# déjà sur le port 80 du cluster, celui que -p "8080:80@loadbalancer" a relié à
+# la machine à la création du cluster. Il ne lui manque que cette règle.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: todo-ingress
+  namespace: todo
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: todo.localhost
+      http:
+        paths:
+          # "/" et non "/api" : /health et / doivent passer aussi. Une règle
+          # limitée à /api ferait répondre Traefik 404 sur /health, et on
+          # croirait l'API en panne alors que seule la route manque.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: todo-api
+                # 80, le port du Service, jamais 3000. Le 3000 est le port du
+                # conteneur, que le Service traduit déjà par son targetPort.
+                port:
+                  number: 80
