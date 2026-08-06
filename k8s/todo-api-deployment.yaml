@@ -58,6 +58,31 @@ spec:
             - secretRef:
                 name: todo-secret
 
+          # Ces valeurs ont été trouvées par l'échec, pas devinées.
+          #
+          # Mesuré avec kubectl top sous une charge d'environ 10 requêtes par
+          # seconde : le conteneur occupe 16 à 17 Mi. En resserrant limits.memory
+          # cran par cran, 20Mi tient et 18Mi part en OOMKilled avec un
+          # Exit Code 137. Le plancher réel est donc entre les deux.
+          #
+          # 96Mi et non 20Mi, et c'est un choix : le plancher a été mesuré sous
+          # une charge légère, avec un seul profil de requêtes. Une pointe de
+          # trafic, un corps JSON plus gros ou un ramasse-miettes qui passe au
+          # mauvais moment suffiraient à faire tomber un pod calé au ras de sa
+          # consommation. La mesure dit où est le mur, elle ne dit pas à quelle
+          # distance s'en garer.
+          #
+          # Aucune limite de CPU, volontairement : une limite CPU ne tue pas le
+          # conteneur, elle le ralentit par étranglement, ce qui se diagnostique
+          # bien plus mal qu'un OOMKilled. La requête suffit à réserver la place
+          # au moment du placement.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+
           # Deux sondes, deux décisions différentes.
           #
           # readiness décide QUI REÇOIT LE TRAFIC. Tant qu'elle échoue, le
