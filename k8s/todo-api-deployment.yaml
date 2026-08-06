@@ -30,3 +30,15 @@ spec:
           image: nghtmre/todo-api:a4f7a329961d65450b5f00489fc186402600104d
           ports:
             - containerPort: 3000
+          # envFrom déverse toutes les clés des deux objets dans l'environnement
+          # du conteneur d'un coup, sans les nommer une par une. Il tombe juste
+          # ici parce que l'API attend déjà DB_HOST, DB_USER et DB_PASSWORD sous
+          # ces noms exacts depuis le Jour 1.
+          #
+          # Aucune de ces valeurs n'est dans l'image ni dans le dépôt : la même
+          # image tourne contre n'importe quelle base sans être reconstruite.
+          envFrom:
+            - configMapRef:
+                name: todo-config
+            - secretRef:
+                name: todo-secret
