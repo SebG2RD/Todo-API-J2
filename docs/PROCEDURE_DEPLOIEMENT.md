@@ -8,12 +8,15 @@ rester ici.
 Toutes les commandes se collent telles quelles. Les seules valeurs à remplacer
 sont écrites `<comme ceci>`.
 
-- Durée d'un déploiement normal : 45 s à 1 min 15 de bout en bout.
-  Au-delà de 3 minutes, quelque chose ne va pas : aller directement au § 6.
-- Coupure attendue : 8 à 12 secondes, le temps que le conteneur `todo-api`
-  soit recréé. La stratégie est un *recreate* assumé.
-- Fenêtre de maintenance : aucune contrainte, projet de formation. Sur un
-  vrai service, une coupure de 10 s se pose hors heures de pointe.
+La cible est un cluster Kubernetes, plus une machine unique jointe par SSH. Il
+n'y a donc plus rien à copier, plus de `docker compose`, et le retour arrière
+est une commande `kubectl`.
+
+- Durée d'un déploiement normal : 2 min de bout en bout depuis le push, dont
+  23 s pour le seul rollout. Au-delà de 5 minutes, aller au § 6.
+- Coupure attendue : aucune. Les pods sont remplacés un par un, et un ancien ne
+  part jamais avant qu'un nouveau soit prêt.
+- Fenêtre de maintenance : aucune contrainte.
 
 ---
 
@@ -21,358 +24,335 @@ sont écrites `<comme ceci>`.
 
 | Élément | Valeur | Où le trouver |
 | --- | --- | --- |
-| Clé privée de déploiement | `deploy_key` | À la racine du dépôt local, jamais versionnée. Si elle manque, voir § 7. |
-| Machine cible | `localhost`, port SSH **2222** | Conteneur `vm-prod` sur le poste de travail |
-| Utilisateur | `root` | Maquette jetable. Sur une vraie machine, ce serait un compte `deploy` sans sudo. |
-| Dossier de déploiement | `/srv/todo` | Sur la machine cible |
-| Fichier de secrets | `/srv/todo/.env` | Sur la machine cible uniquement. Modèle : `deploy/env.example`. |
+| Cluster | `todo-cluster` | k3d, sur le poste de travail |
+| Contexte kubectl | `k3d-todo-cluster` | `~/.kube/config` |
+| Namespace | `todo` | |
+| Deployment | `todo-api`, 3 replicas | `k8s/todo-api-deployment.yaml` |
+| Base | `todo-db`, 1 replica, volume `todo-db-data` | `k8s/todo-db.yaml` |
+| Secret | `todo-secret` | Dans le cluster uniquement. Modèle : `k8s/todo-secret.example.yaml` |
 | Image | `nghtmre/todo-api:<sha du commit>` | Docker Hub |
-| API | <http://localhost:3000> | Publiée par `vm-prod` |
-| Prometheus | <http://localhost:9090> | |
-| Grafana | <http://localhost:3001> | Lecture anonyme activée, aucun mot de passe à demander |
+| API | <http://todo.localhost:8080> | Par l'Ingress Traefik |
 
 Raccourci utilisé partout dans ce document :
 
 ```bash
 cd "<racine du dépôt>"
-SSH="ssh -i deploy_key -p 2222 root@localhost"
+K="kubectl -n todo --context k3d-todo-cluster"
 ```
 
-Vérification : `$SSH "echo ok"` doit répondre `ok`. Si non, § 7.
+Vérification : `$K get nodes` répond avec un nœud `Ready`. Si non, § 6.7.
 
 ---
 
 ## 2. Vérifications AVANT de toucher à quoi que ce soit
 
-Ces trois relevés servent de point de comparaison. Sans eux, impossible de
-prouver après coup que le déploiement a amélioré ou dégradé les choses.
+Ces relevés servent de point de comparaison. Sans eux, impossible de prouver
+après coup que le déploiement a amélioré ou dégradé les choses.
 
 ```bash
-# 2.1. Quelle version tourne actuellement ? Noter ce sha : c'est la cible du
-#       retour arrière du § 5.
-$SSH "docker inspect -f '{{.Config.Image}}' todo-api"
+# 2.1. Quelle version tourne ? Noter ce sha : c'est la cible du retour arrière.
+$K get deployment todo-api -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 
 # 2.2. Tout est-il debout ?
-$SSH "docker ps --format '{{.Names}}\t{{.Status}}'"
+$K get pods
 
 # 2.3. Le service répond-il, là, maintenant ?
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/health
+curl -s -o /dev/null -w "%{http_code}\n" -H "Host: todo.localhost" http://localhost:8080/api/tasks
 ```
 
 Vérifications attendues :
 
-- 2.1 affiche `nghtmre/todo-api:<40 caractères hexadécimaux>`. S'il affiche
-  `latest`, quelqu'un a déployé à la main hors pipeline : le retour arrière
-  sera impossible, prévenir avant de continuer.
-- 2.2 liste quatre conteneurs : `todo-api` et `todo-db` en `(healthy)`,
-  `prometheus` et `grafana` en `Up`.
-- 2.3 répond `200`.
+- 2.1 affiche un tag de 40 caractères hexadécimaux. S'il affiche `latest`,
+  quelqu'un a déployé à la main hors pipeline : le retour arrière sera une
+  enquête, prévenir avant de continuer.
+- 2.2 liste 3 pods `todo-api` en `1/1 Running` et 1 pod `todo-db` en
+  `1/1 Running`.
+- 2.3 répond `200`. **C'est la seule commande qui prouve que la chaîne
+  complète fonctionne** : voir le piège du § 5.
 
 ---
 
-## 3. Déploiement automatique : le cas normal
+## 3. Déploiement automatique, le cas normal
 
 Il n'y a rien à taper. Un `git push` sur `main` suffit :
 
 1. `test` et `test-integration` tournent sur des machines fournies par GitHub.
 2. `build` construit l'image et la pousse sur Docker Hub, taguée au sha.
-3. `deploy` tourne sur le runner self-hosted, se connecte en SSH à la machine
-   cible, envoie `deploy/`, lance `docker compose up -d`, puis interroge
-   `/health` jusqu'à obtenir un `200`.
+3. `deploy` tourne sur le runner self-hosted, applique les manifestes avec le
+   tag du commit substitué, puis attend `kubectl rollout status`.
 
-Vérification : dans l'onglet Actions, les quatre jobs sont verts. Le job
-`deploy` affiche `/health répond 200 après N tentative(s)`.
+Vérification : les quatre jobs sont verts dans l'onglet Actions. Le job
+`deploy` affiche `deployment "todo-api" successfully rolled out`, puis
+`/api/tasks répond 200`.
+
+Le job ne peut pas mentir : `kubectl set image` et `kubectl apply` rendent la
+main immédiatement, sans rien garantir. C'est `rollout status` qui attend la
+convergence réelle, pod par pod, et qui sort en code 1 si elle n'arrive pas.
+Vérifié : sur un tag inexistant, il rend `error: timed out waiting for the
+condition` et le job devient rouge.
 
 Prérequis à contrôler une fois pour toutes, sinon rien ne part :
 
 ```bash
-gh secret list   # doit lister DOCKERHUB_USERNAME, DOCKERHUB_TOKEN,
-                 # DEPLOY_SSH_KEY, DEPLOY_HOST, DEPLOY_PORT, DEPLOY_USER
+gh secret list   # DOCKERHUB_USERNAME et DOCKERHUB_TOKEN suffisent désormais
 gh api repos/<compte>/<dépôt>/actions/runners --jq '.runners[] | "\(.name) \(.status)"'
                  # doit afficher : vm-prod-host online
 ```
 
-Un runner `offline` laisse le job `deploy` en Queued indéfiniment, sans
-message d'erreur. C'est le comportement normal, pas une panne de GitHub : aller
-au § 7.3.
+Les secrets `DEPLOY_*` de la version SSH ne servent plus. Le runner partage la
+machine du cluster et lit le même kubeconfig que les commandes tapées à la
+main : aucune clé, aucun tunnel.
+
+Un runner `offline` laisse le job `deploy` en Queued indéfiniment, sans message
+d'erreur. Aller au § 6.8.
 
 ---
 
-## 4. Déploiement manuel : quand la pipeline n'est pas disponible
+## 4. Déploiement manuel d'urgence, si la pipeline est en panne
 
-À n'utiliser que si GitHub Actions est en panne ou le runner injoignable.
+À n'utiliser que si GitHub Actions est indisponible.
 
 ```bash
 # 4.1. Choisir la version. Un sha de commit, jamais "latest".
 SHA=<sha du commit à déployer>
 
-# 4.2. Vérifier que l'image existe AVANT de toucher à la production.
+# 4.2. Vérifier que l'image existe AVANT de toucher au cluster.
 docker manifest inspect nghtmre/todo-api:$SHA > /dev/null && echo "image trouvée"
 ```
 
 Vérification : la commande affiche `image trouvée`. Si elle répond
-`manifest unknown`, le tag n'existe pas : ne pas continuer, reprendre au 4.1.
+`manifest unknown`, ne pas continuer, reprendre au 4.1.
 
 ```bash
-# 4.3. Envoyer la description de la stack (compose, Prometheus, Grafana).
-$SSH "mkdir -p /srv/todo"
-scp -i deploy_key -P 2222 -r deploy/. root@localhost:/srv/todo/
-$SSH "rm -f /srv/todo/env.example"
+# 4.3. Appliquer l'état voulu, avec le tag substitué comme le fait la pipeline.
+sed "s|image: .*/todo-api:.*|image: nghtmre/todo-api:$SHA|" k8s/todo-api-deployment.yaml \
+  | $K apply -f -
 ```
 
-Vérification : `$SSH "ls /srv/todo"` liste `compose.yml`, `prometheus.yml`,
-`grafana` et `.env`. Si `.env` manque, voir § 7.4.
+Vérification : la sortie affiche `deployment.apps/todo-api configured`.
+
+**Piège vérifié** : un `$K apply -f k8s/todo-api-deployment.yaml` sans
+substitution ramène le tag écrit dans le fichier et fait **reculer la
+production d'une version**, sans erreur ni avertissement. C'est le `sed`
+ci-dessus qui l'évite, et c'est exactement ce que fait la pipeline.
 
 ```bash
-# 4.4. Déployer.
-$SSH "cd /srv/todo && IMAGE='nghtmre/todo-api' TAG='$SHA' docker compose up -d"
+# 4.4. Attendre la convergence réelle.
+$K rollout status deployment/todo-api --timeout=180s
 ```
 
-Vérification : la sortie affiche `Container todo-api Started` ou
-`Recreated`. Le code de sortie de la commande est `0` (`echo $?`).
+Vérification : `deployment "todo-api" successfully rolled out`, et le code de
+sortie vaut `0` (`echo $?`).
 
 ```bash
-# 4.5. Vérifier que le service répond réellement.
-sleep 12
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/health
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks
-```
+# 4.5. Vérifier que le service répond vraiment.
+curl -s -o /dev/null -w "%{http_code}\n" -H "Host: todo.localhost" http://localhost:8080/api/tasks
 
-Vérification : les deux répondent `200`. `/health` seul ne suffit pas : il
-ne touche pas la base, et répond `200` même quand la base est morte.
-
-```bash
 # 4.6. Confirmer la version réellement en place.
-$SSH "docker inspect -f '{{.Config.Image}}' todo-api"
+$K get deployment todo-api -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
 
-Vérification : le sha affiché est bien celui du 4.1.
+Vérification : `200`, et le sha affiché est celui du 4.1.
 
 ---
 
-## 5. Retour arrière
+## 5. Le piège à connaître avant d'ouvrir un terminal
 
-### 5.1 Quand le déclencher, et qui décide
+`/health` ne touche pas la base. Il répond `200` même quand PostgreSQL est
+mort, et les deux sondes du pod sont bâties dessus : elles mentent donc de la
+même façon.
 
-| Signal observé sur le tableau de bord | Action | Qui décide |
-| --- | --- | --- |
-| Taux d'erreur 5xx **au-dessus de 5 %** pendant plus de 2 minutes | Retour arrière immédiat, sans validation supplémentaire | La personne d'astreinte, seule |
-| `up` à **0** pendant plus de 1 minute | Retour arrière immédiat | La personne d'astreinte, seule |
-| p95 au-dessus de **500 ms**, mais taux d'erreur sous 1 % | Surveiller 10 minutes de plus, prévenir l'astreinte | La personne d'astreinte alerte, ne décide pas seule |
-| Signal ambigu, rien de franchement rouge | Ne rien toucher, attendre une validation humaine | Le responsable du service |
+Mesuré en coupant la base sans toucher à l'API :
 
-### 5.2 Comment le faire
+| Ce que le cluster affirme | Ce que rend le service |
+| --- | --- |
+| 3 pods `READY 1/1 Running` | `GET /health` → `200` |
+| 0 événement `Unhealthy` dans `describe pod` | `GET /api/tasks` → `503` |
+| 0 redémarrage | |
+
+**Un pod `READY 1/1` ne prouve rien d'autre que « le serveur HTTP répond à
+lui-même ».** La seule commande qui prouve que le service marche est celle qui
+traverse toute la chaîne :
 
 ```bash
-# Le sha relevé au § 2.1, celui qui tournait AVANT le déploiement fautif.
-PRECEDENT=<sha précédent>
-$SSH "cd /srv/todo && IMAGE='nghtmre/todo-api' TAG='$PRECEDENT' docker compose up -d"
+curl -s -o /dev/null -w "%{http_code}\n" -H "Host: todo.localhost" http://localhost:8080/api/tasks
 ```
 
-Vérification : `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks`
-répond `200`, et le panneau **Disponibilité** de Grafana repasse à `EN LIGNE`.
-
-Durée mesurée : 11,8 secondes entre le lancement de la commande et le
-premier `200` sur `/api/tasks`. Aucune reconstruction, aucune pipeline : l'image
-précédente est encore sur Docker Hub, taguée à son sha.
-
-Si le tag n'existe pas : la commande échoue avec
-`manifest unknown` et la production n'est pas touchée, l'ancienne version
-continue de servir. Vérifié. Reprendre avec un sha valide, à retrouver dans
-l'historique Git ou sur Docker Hub.
-
-Limite connue : ce retour arrière ne concerne que le code. Si le
-déploiement fautif a modifié le schéma de la base, revenir sur le code sans
-revenir sur le schéma peut casser autant que le bug qu'on fuyait. À ce jour,
-`db/schema.sql` n'utilise que des `CREATE ... IF NOT EXISTS` : aucune migration
-destructive n'existe, le retour arrière est donc sûr.
+Cette limite se documente, elle ne se corrige pas à la légère. Un `/health` qui
+interrogerait la base à chaque appel protégerait de ce mensonge, mais exposerait
+l'application à une cascade de sondes qui échouent toutes en même temps dès que
+la base ralentit un peu, et donc à des redémarrages en boucle qui aggraveraient
+la panne.
 
 ---
 
-## 6. Pannes connues et leur signature dans le tableau de bord
+## 6. Pannes connues, leur signature et leur remède
 
-Ces quatre signatures ont été mesurées sur cette machine, sous une charge de
-~3 requêtes/seconde. Elles suffisent à identifier la panne sans se connecter.
+Les cinq premières lignes correspondent aux tirages de `scripts/chaos.sh`.
+Toutes ont été rejouées et mesurées, aucune n'est déduite.
 
-Toutes ces valeurs ont été relevées en rejouant chaque panne, pas déduites.
-Le premier tri se fait sur `up`, et il partage les pannes en deux familles.
-
-### Famille A : `up` vaut 0, et `curl` depuis le poste répond `000`
-
-`000` n'est pas un code HTTP : c'est `curl` qui n'a même pas obtenu de
-connexion. Trois pannes différentes donnent cette même image, et seul
-`docker ps` les sépare. C'est la commande à taper en premier.
+**Le réflexe qui fait gagner le plus de temps** : les cinq pannes laissent
+`/api/tasks` répondre `200`. Les anciens pods continuent de servir pendant que
+le nouveau échoue. **Une panne de déploiement ne se voit pas depuis
+l'extérieur**, elle ne se voit que dans `kubectl get pods`. C'est la première
+commande à taper, avant tout curl.
 
 ```bash
-$SSH "docker ps -a --format '{{.Names}}\t{{.Status}}'"
+$K get pods
+$K describe pod <le pod qui ne va pas>   # les événements sont en bas
 ```
 
-| # | Panne | Ce qu'affiche `docker ps -a` pour `todo-api` | Confirmation |
-| --- | --- | --- | --- |
-| 1 | `todo-api` arrêté | `Exited (137)` ou `Exited (0)` | `docker logs` s'arrête net, sans erreur |
-| 3 | Réseau coupé entre l'API et la base | `Up (healthy)` | `docker inspect -f '{{.NetworkSettings.Networks}}' todo-api` renvoie une liste vide, et `docker port todo-api` n'affiche rien |
-| 4 | `todo-api` relancé sans sa configuration | `Exited (1)` | `docker logs todo-api` affiche `Démarrage impossible : Variable d'environnement manquante : DB_HOST` |
+| # | Panne | `get pods` | `describe` / logs | Se répare seule ? | Remède |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Un pod supprimé | un pod `Terminating`, un nouveau apparaît | rien d'anormal | **Oui, 10 s** | aucun |
+| 2 | Processus tué dans le conteneur | même pod, `RESTARTS` +1 | `Last State: Terminated`, `Reason: Completed`, `Exit Code: 0` | **Oui, 9 s** | aucun |
+| 3 | Tag d'image inexistant | un pod `ErrImagePull` puis `ImagePullBackOff`, les 3 anciens `Running` | `Failed to pull image ... : not found` | Non | `$K rollout undo deployment/todo-api` (1 s) |
+| 4 | Clé du Secret supprimée | un pod `CrashLoopBackOff`, les 3 anciens `Running` | `Exit Code: 1`, log : `Variable d'environnement manquante : DB_PASSWORD` | Non | restaurer la clé puis `$K rollout restart deployment/todo-api` (21 s) |
+| 5 | Limite mémoire trop basse | un pod `CrashLoopBackOff`, les 3 anciens `Running` | `Last State: Terminated`, `Reason: OOMKilled`, `Exit Code: 137` | Non | réappliquer le manifeste du dépôt (§ 4.3) |
 
-La panne 3 est la plus déroutante des trois : le conteneur tourne, se déclare
-`healthy`, et pourtant plus rien ne l'atteint. Détaché de son réseau, il perd
-aussi la publication de son port 3000, d'où le `000` côté poste et le `up` à 0
-côté Prometheus, qui ne le joint plus non plus.
+Ce que le cluster répare, et ce qu'il ne répare pas : la boucle de
+réconciliation corrige ce qu'elle peut voir, un pod qui manque ou un conteneur
+qui s'est arrêté. Une image introuvable, un secret absent ou une limite mal
+calibrée sont des états voulus, écrits par un humain. Le cluster les applique
+fidèlement et attend qu'un humain les corrige.
 
-Délai de détection mesuré : `up` passe à 0 en **8 secondes** après l'arrêt du
-conteneur, pour un `scrape_interval` de 5 s.
-
-### Famille B : `up` vaut 1, le service répond mais quelque chose cloche
-
-Ici, c'est le p95 qui tranche, pas le taux d'erreur.
-
-| # | Panne | Taux 5xx | p95 | Lecture |
-| --- | --- | --- | --- | --- |
-| 2 | `todo-db` arrêté | **61 %** | **4,8 s** | Erreurs **et** latence. Le p95 colle aux 3 s de `connectionTimeoutMillis` : ça échoue lentement, donc en aval. |
-| 5 | Machine saturée (conteneurs dévoreurs de CPU) | **0 %** | **83 ms** au lieu de 21 | Latence multipliée par 4 sans une seule erreur. Le seul cas de cette forme. |
-| hors script | Régression de code déployée | **33 %** | **24 ms** | Erreurs sans latence : ça échoue vite, donc dans le code. L'inverse exact de la panne 2. |
-
-Pour la 2, vérifier `docker ps` : `todo-db` y est `Exited`. Pour la 5,
-`docker ps` liste des conteneurs `hog-*` qui n'ont rien à faire là.
-
-### Le piège à connaître avant d'ouvrir un terminal
-
-`docker ps` affiche `todo-api` en **`healthy`** dans les pannes **2, 3 et 5**,
-et aussi quand une régression de code est en production. Le `HEALTHCHECK`
-interroge `/health` depuis l'intérieur du conteneur, et `/health` ne touche pas
-la base, c'est délibéré, pour qu'une panne de base ne déclenche pas des
-redémarrages en boucle. **Un `healthy` ne prouve rien d'autre que « le process
-Node répond à lui-même ».** La seule commande qui prouve que le service marche
-vraiment est celle qui traverse toute la chaîne :
+### Réparations, commandes exactes
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks   # doit répondre 200
+# Panne 3 : revenir à la révision précédente
+$K rollout undo deployment/todo-api
+$K rollout status deployment/todo-api --timeout=180s
+
+# Panne 4 : restaurer la clé manquante, puis relancer les pods
+$K patch secret todo-secret -p '{"stringData":{"DB_PASSWORD":"<le mot de passe>"}}'
+$K rollout restart deployment/todo-api
+$K rollout status deployment/todo-api --timeout=180s
+
+# Panne 5 : réappliquer l'état voulu du dépôt (voir le § 4.3 pour le tag)
+sed "s|image: .*/todo-api:.*|image: nghtmre/todo-api:<sha>|" k8s/todo-api-deployment.yaml | $K apply -f -
+$K rollout status deployment/todo-api --timeout=180s
 ```
 
-### Réparations
+Vérification, après n'importe laquelle : `$K get pods` ne montre que des pods
+`1/1 Running`, et `/api/tasks` répond `200`.
+
+### 6.6 La base ne répond plus
+
+Signature : `/health` → `200`, `/api/tasks` → `503`, pods `todo-api` tous
+`READY 1/1`. Voir le § 5.
 
 ```bash
-# Panne 1
-$SSH "docker start todo-api"
-
-# Panne 2
-$SSH "docker start todo-db"
-
-# Panne 3 : réattacher le conteneur à son réseau
-$SSH "docker network connect todo-prod todo-api && docker restart todo-api"
-
-# Panne 4 : redéployer proprement (§ 4.4) avec le sha relevé au § 2.1
-$SSH "docker inspect -f '{{.Config.Image}}' todo-api"   # pour lire le sha en cours
-$SSH "cd /srv/todo && IMAGE='nghtmre/todo-api' TAG='<sha>' docker compose up -d"
-
-# Panne 5 : supprimer les conteneurs dévoreurs
-$SSH "docker rm -f \$(docker ps -aq --filter name=hog-)"
+$K get pods -l app=todo-db
+$K get endpointslice -l kubernetes.io/service-name=todo-db
+$K logs -l app=todo-api --tail=5
 ```
 
-**Vérification, après n'importe laquelle de ces réparations** :
-`curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks`
-répond `200`, et les quatre conteneurs sont listés par
-`$SSH "docker ps --format '{{.Names}}'"`.
+- Si le pod `todo-db` est absent ou `0/1` : `$K rollout restart deployment/todo-db`.
+- Si le pod tourne mais que la liste d'endpoints est **vide**, le `selector` du
+  Service ne colle plus aux étiquettes des pods. Vérifié : les pods PostgreSQL
+  tournent, et l'API reçoit `ECONNREFUSED` sur l'IP du Service.
+  Remède : `$K apply -f k8s/todo-db.yaml`.
 
----
-
-## 7. Ce qui bloque le plus souvent
-
-### 7.1 `Permission denied (publickey)`
-
-La clé privée n'est pas la bonne, ou la publique n'est plus sur la machine.
+### 6.7 `kubectl` ne joint pas le cluster
 
 ```bash
-ssh-keygen -y -f deploy_key                  # empreinte de la clé locale
-$SSH "cat /root/.ssh/authorized_keys"        # ce que la machine accepte
+kubectl config current-context        # doit afficher k3d-todo-cluster
+docker ps --filter name=k3d-todo-cluster
+k3d cluster start todo-cluster        # si les conteneurs sont arrêtés
 ```
 
-Les deux lignes doivent être identiques. Si `deploy_key` a été perdue, la
-machine cible doit être reconstruite (§ 7.5) : il n'y a pas d'autre porte.
-
-### 7.2 `Connection refused` sur le port 2222
-
-La machine cible ne tourne plus.
+**Piège spécifique à Docker Desktop sous Windows** : `k3d` écrit un kubeconfig
+qui pointe sur `https://host.docker.internal:<port>`, lequel résout vers l'IP
+du réseau local et ne répond pas. Le symptôme est une série de
+`dial tcp 192.168.x.x:<port>: connectex: A connection attempt failed`.
 
 ```bash
-docker ps -a --filter name=vm-prod --format '{{.Names}} {{.Status}}'
-docker start vm-prod
-sleep 30      # le daemon Docker interne met ~25 s à accepter des connexions
-$SSH "docker ps"
+PORT=$(docker port k3d-todo-cluster-serverlb 6443/tcp | head -1 | cut -d: -f2)
+kubectl config set-cluster k3d-todo-cluster --server="https://127.0.0.1:$PORT"
+kubectl get nodes
 ```
 
-Vérification : les quatre conteneurs remontent seuls, grâce au
-`restart: unless-stopped`. Vérifié après un redémarrage complet du poste.
+### 6.8 Le job `deploy` reste « Queued » sans erreur
 
-### 7.3 Le job `deploy` reste « Queued » sans erreur
-
-Le runner self-hosted n'écoute plus.
+Le runner self-hosted n'écoute plus, ou il a été redémarré pendant que GitHub
+lui assignait le job.
 
 ```bash
 gh api repos/<compte>/<dépôt>/actions/runners --jq '.runners[] | "\(.name) \(.status)"'
 ```
 
-S'il est `offline`, relancer l'agent depuis son dossier d'installation
-(`C:\Users\<vous>\actions-runner`) avec `run.cmd`, et attendre `Listening for
-Jobs`. Compter jusqu'à 2 minutes : une ancienne session peut encore tenir la
-place, avec le message `A session for this runner already exists`.
+S'il est `offline`, relancer `run.cmd` depuis `C:\Users\<vous>\actions-runner`
+et attendre `Listening for Jobs`. Compter jusqu'à 2 minutes : une ancienne
+session peut tenir la place, avec `A session for this runner already exists`
+dans `runner.err`.
 
-### 7.4 `.env` manquant sur la machine cible
-
-`docker compose up` avertit que `DB_PASSWORD` n'est pas défini, et `todo-api`
-part en boucle de redémarrage.
-
-```bash
-$SSH "cat > /srv/todo/.env" < deploy/env.example
-$SSH "vi /srv/todo/.env && chmod 600 /srv/todo/.env"
-```
-
-Vérification : `$SSH "cut -d= -f1 /srv/todo/.env"` liste `DB_NAME`,
-`DB_USER`, `DB_PASSWORD`. Ne jamais afficher le fichier entier dans un
-terminal partagé.
-
-### 7.5 Reconstruire la machine cible de zéro
+Si le runner est `online` et que le job reste malgré tout en attente, il a été
+assigné à une session morte. **Vérifié deux fois** : annuler le run et le
+relancer est le seul remède, l'attente ne débloque rien.
 
 ```bash
-docker rm -f vm-prod
-ssh-keygen -t ed25519 -N "" -f deploy_key -C "deploy@todo-api"   # si la clé est perdue
-docker build -f Dockerfile.vm -t vm-prod .
-docker run -d --privileged --name vm-prod \
-  -p 2222:22 -p 3000:3000 -p 9090:9090 -p 3001:3001 \
-  -v vm-prod-data:/var/lib/docker vm-prod
+gh run cancel <id>
+gh workflow run ci.yml --ref main
 ```
 
-Puis refaire le § 7.4, mettre à jour le secret `DEPLOY_SSH_KEY`
-(`gh secret set DEPLOY_SSH_KEY < deploy_key`), et redéployer (§ 4).
+### 6.9 Le port 8080 est déjà pris
 
-### 7.6 Le port 3000 est déjà pris sur la machine cible
-
-`docker compose up` échoue avec `port is already allocated`. Un autre conteneur
-occupe le port, et `docker stop todo-api` ne le libérera pas puisqu'il porte un
-autre nom.
+`k3d cluster create` échoue sur un port occupé, en général par un cluster de
+démonstration resté en place.
 
 ```bash
-$SSH "docker ps --format '{{.Names}}\t{{.Ports}}' | grep 3000"
-$SSH "docker rm -f <le nom affiché>"
+k3d cluster list
+k3d cluster delete <l'autre cluster>
 ```
 
-Vérification : `$SSH "docker ps --format '{{.Ports}}' | grep -c 3000"`
-répond `0` avant de relancer le § 4.4.
+---
 
-### 7.7 Un panneau Grafana est vide
+## 7. Retour arrière
 
-Dans l'ordre, et pas dans un autre :
+### 7.1 Quand le déclencher, et qui décide
 
-1. La source de données répond-elle ? Grafana → Connections → Data sources →
-   Prometheus → **Test**. Elle doit pointer sur `http://prometheus:9090`, le
-   nom du service. `localhost:9090` désigne Grafana lui-même : c'est l'erreur
-   qui fait perdre un quart d'heure.
-2. Prometheus voit-il sa cible ? <http://localhost:9090/targets> doit lister
-   `todo-api` en **UP**.
-3. Seulement ensuite, relire la requête PromQL du panneau.
+| Signal observé | Action | Qui décide |
+| --- | --- | --- |
+| Taux d'erreur 5xx au-dessus de 5 % pendant plus de 2 minutes | Retour arrière immédiat, sans validation supplémentaire | La personne d'astreinte, seule |
+| `/api/tasks` répond une erreur alors que les pods sont `1/1` | Retour arrière immédiat | La personne d'astreinte, seule |
+| Latence en hausse, taux d'erreur sous 1 % | Surveiller 10 minutes, prévenir l'astreinte | La personne d'astreinte alerte, ne décide pas seule |
+| Signal ambigu, rien de franchement rouge | Ne rien toucher, attendre une validation humaine | Le responsable du service |
 
-Cas normal à ne pas confondre avec une panne : le panneau **Erreurs** reste
-vide quand il n'y a aucun trafic. Le taux d'erreur est un rapport, et sans
-requête il n'est pas défini. Envoyer une requête pour lever le doute.
+### 7.2 Comment le faire
+
+```bash
+$K rollout undo deployment/todo-api
+$K rollout status deployment/todo-api --timeout=180s
+```
+
+Vérification : `/api/tasks` répond `200`.
+
+**Durée mesurée**, du constat au premier `200` : **13,6 s**. La convergence
+complète des trois pods prend 23 s, mais le service est rétabli avant, dès que
+le premier pod sain est prêt.
+
+Pour viser une révision précise, et pas seulement la précédente :
+
+```bash
+$K rollout history deployment/todo-api
+$K rollout undo deployment/todo-api --to-revision=<N>
+```
+
+Vérifié : une révision qui n'existe pas échoue proprement avec
+`error: unable to find specified revision 999 in history`, code de sortie 1, et
+**la production ne bouge pas**.
+
+### 7.3 Limite connue
+
+Ce retour arrière ne concerne que le code. Si un déploiement a modifié le
+schéma de la base, revenir sur le code sans revenir sur le schéma peut casser
+autant que le bug qu'on fuyait. À ce jour, `db/schema.sql` n'utilise que des
+`CREATE ... IF NOT EXISTS` : aucune migration destructive n'existe, le retour
+arrière est donc sûr.
+
+Les données, elles, ne sont jamais en jeu : elles vivent dans la
+PersistentVolumeClaim `todo-db-data`, détachée du cycle de vie du pod. Vérifié :
+une tâche créée survit à la suppression du pod PostgreSQL.
 
 ---
 
@@ -381,24 +361,21 @@ requête il n'est pas défini. Envoyer une requête pour lever le doute.
 À faire dans l'ordre, et à comparer avec le § 2.
 
 ```bash
-$SSH "docker ps --format '{{.Names}}\t{{.Status}}'"
-$SSH "docker inspect -f '{{.Config.Image}}' todo-api"
-curl -s http://localhost:3000/health
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/tasks
-curl -s http://localhost:3000/metrics | head -3
+$K get pods
+$K get deployment todo-api -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+curl -s -H "Host: todo.localhost" http://localhost:8080/health
+curl -s -o /dev/null -w "%{http_code}\n" -H "Host: todo.localhost" http://localhost:8080/api/tasks
+$K top pods
 ```
 
 Vérifications attendues :
 
-- quatre conteneurs, `todo-api` et `todo-db` en `(healthy)` ;
+- 3 pods `todo-api` en `1/1 Running`, 0 redémarrage, plus un pod `todo-db` ;
 - le sha affiché est celui qu'on voulait déployer, pas celui du § 2.1 ;
 - `/health` répond `{"status":"ok",...}` ;
-- `/api/tasks` répond `200`, c'est celui-là qui prouve que la base répond ;
-- `/metrics` commence par `# HELP`, en texte brut.
-
-Puis, sur Grafana (<http://localhost:3001>), tableau de bord
-**Todo API, les quatre signaux** : Disponibilité à `EN LIGNE`, et le taux
-d'erreur revenu sous 1 % dans les deux minutes.
+- `/api/tasks` répond `200`, et c'est celui-là qui prouve que la base répond ;
+- `$K top pods` affiche 16 à 17 Mi par pod. Au-delà de 60 Mi, quelque chose a
+  changé : la limite est à 96 Mi et un `OOMKilled` guette.
 
 ---
 
@@ -408,8 +385,8 @@ d'erreur revenu sous 1 % dans les deux minutes.
 | --- | --- | --- | --- |
 | Retour arrière effectué, service rétabli | Le responsable du service, pour information | Message écrit | Dans l'heure |
 | Retour arrière tenté, service toujours cassé | Le responsable du service, immédiatement | Téléphone | Tout de suite |
-| Doute sur la marche à suivre | La personne d'astreinte suivante | Téléphone | Avant de toucher à la production |
-| Suspicion de fuite de secret (clé, mot de passe) | Le responsable du dépôt | Téléphone, jamais par écrit | Tout de suite |
+| Doute sur la marche à suivre | La personne d'astreinte suivante | Téléphone | Avant de toucher au cluster |
+| Suspicion de fuite de secret | Le responsable du dépôt | Téléphone, jamais par écrit | Tout de suite |
 
 Après tout incident, écrire un compte rendu sans chercher de coupable :
 chronologie minute par minute, impact réel, cause profonde, et les actions
