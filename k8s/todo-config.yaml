@@ -1,0 +1,21 @@
+# Ce que l'API doit savoir, et qui n'est pas sensible.
+#
+# Hier, ces valeurs vivaient dans un .env copié à la main sur la machine cible.
+# Elles vivent maintenant dans un objet que le cluster distribue, ce qui veut
+# dire qu'une seule et même image peut tourner contre n'importe quelle base
+# sans être reconstruite.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: todo-config
+  namespace: todo
+data:
+  # Ni une adresse IP ni localhost : le nom exact du Service PostgreSQL. Le DNS
+  # interne du cluster le résout vers les pods portant l'étiquette app: todo-db,
+  # quel que soit leur nombre ou leur IP du moment.
+  DB_HOST: todo-db
+  DB_PORT: "5432"
+  NODE_ENV: production
+  # Le port d'écoute du serveur. Il doit correspondre au containerPort du
+  # Deployment et au targetPort du Service, sinon rien ne se joint.
+  PORT: "3000"
