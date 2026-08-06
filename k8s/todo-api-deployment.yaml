@@ -1,0 +1,32 @@
+# Le Deployment décrit l'état voulu, pas les gestes pour y arriver.
+#
+# On ne dit jamais « lance un conteneur » : on dit « il doit exister N pods
+# construits sur ce modèle ». La boucle de réconciliation du cluster compare en
+# permanence cet état voulu à l'état réel, et corrige l'écart toute seule. Un pod
+# supprimé à la main réapparaît en quelques secondes, sans qu'on ait rien retapé.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-api
+  namespace: todo
+spec:
+  replicas: 1
+  # Le selector relie ce Deployment aux pods qu'il possède. Il doit coller aux
+  # labels du template ci-dessous, sinon le Deployment crée des pods qu'il ne
+  # reconnaît pas et en recrée indéfiniment.
+  selector:
+    matchLabels:
+      app: todo-api
+  template:
+    metadata:
+      labels:
+        app: todo-api
+    spec:
+      containers:
+        - name: todo-api
+          # Le tag est le sha d'un commit précis, jamais latest. Un tag mouvant
+          # rendrait impossible de dire quelle version tourne, et le retour
+          # arrière redeviendrait une enquête.
+          image: nghtmre/todo-api:a4f7a329961d65450b5f00489fc186402600104d
+          ports:
+            - containerPort: 3000
