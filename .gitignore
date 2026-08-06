@@ -12,3 +12,12 @@ deploy_key
 deploy_key.pub
 *.pem
 id_ed25519*
+
+# Le Secret du cluster, valeurs comprises. Seul k8s/todo-secret.example.yaml
+# est versionné : un base64 dans un manifeste ne chiffre rien, il se relit en
+# une commande. Cette ligne est écrite avant que le vrai fichier existe.
+k8s/todo-secret.yaml
+
+# Le kubeconfig donne les pleins pouvoirs sur le cluster à quiconque le lit.
+kubeconfig*
+*.kubeconfig
