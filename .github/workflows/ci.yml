@@ -116,91 +116,79 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+
   deploy:
-    name: Déployer sur la machine cible
+    name: Déployer sur le cluster
     # Rien ne se déploie avant que l'image existe sur le registry.
     needs: [build]
-    # Le runner hébergé par GitHub ne peut pas joindre une machine posée sur un
-    # bureau, derrière une box, sans adresse publique. On place donc
-    # l'exécutrice du bon côté de la porte, et ce job seul y tourne : les tests
-    # restent sur des machines jetables fournies par GitHub.
+    # Le runner ne bouge pas, la cible si. Hier il ouvrait une connexion SSH vers
+    # une machine injoignable autrement ; aujourd'hui le cluster tourne sur cette
+    # même machine, celle où l'agent écoute déjà. Il n'a donc besoin ni de clé ni
+    # d'un secret supplémentaire : juste de kubectl et du kubeconfig que k3d y a
+    # écrit à la création du cluster. Le déploiement devient plus simple qu'hier.
     runs-on: self-hosted
     if: github.ref == 'refs/heads/main'
     env:
       IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/todo-api
       TAG: ${{ github.sha }}
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      NAMESPACE: todo
+      # Nommé explicitement : sur une machine qui connaît plusieurs clusters,
+      # un kubectl sans contexte déploierait au hasard sur celui du moment.
+      KUBE_CONTEXT: k3d-todo-cluster
     steps:
       - uses: actions/checkout@v4
 
-      # La clé privée vit en mémoire, dans un agent, et rien d'autre. Un fichier
-      # de clé écrit sur le disque du runner y survivrait au job ; ici, l'agent
-      # meurt avec lui. `tr -d` retire les retours chariot que Windows ajoute au
-      # passage, et sans lesquels ssh-add refuse la clé comme invalide.
-      - name: Charger la clé de déploiement dans un agent SSH
+      # Un job qui déploie sur le mauvais cluster est pire qu'un job qui échoue.
+      - name: Vérifier le cluster visé
         shell: bash
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
-          eval "$(ssh-agent -s)" > /dev/null
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
-          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' | ssh-add -
-          # L'empreinte de la machine cible est relevée à chaud : la maquette
-          # est reconstruite souvent, donc sa clé d'hôte change souvent.
-          mkdir -p ~/.ssh
-          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" > ~/.ssh/known_hosts 2>/dev/null
+          kubectl config use-context "$KUBE_CONTEXT"
+          kubectl get nodes
+          kubectl get namespace "$NAMESPACE"
 
-      # Le fichier qui décrit la stack part du dépôt vers la machine cible. Le
-      # .env, lui, reste là-bas : il porte le mot de passe de la base et n'est
-      # jamais poussé, jamais versionné.
-      - name: Envoyer la description de la stack
+      # On ne touche qu'à l'image. Le reste de l'état voulu, replicas, sondes,
+      # ressources, vit dans les manifestes et n'a pas à être réécrit à chaque
+      # déploiement.
+      - name: Mettre à jour l'image du Deployment
         shell: bash
         run: |
-          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p /srv/todo"
-          # Tout le dossier deploy/ : le compose, la configuration de Prometheus
-          # et la définition du tableau de bord. Ces trois-là sont du code, et
-          # ils ne se modifient jamais directement sur la machine cible.
-          scp -P "$DEPLOY_PORT" -r deploy/. "$DEPLOY_USER@$DEPLOY_HOST:/srv/todo/"
-          # env.example n'a rien à faire en production : le vrai .env est déjà
-          # là-bas, posé une fois à la main, et il porte le mot de passe.
-          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "rm -f /srv/todo/env.example"
+          kubectl set image deployment/todo-api "todo-api=$IMAGE:$TAG" \
+            -n "$NAMESPACE" --context "$KUBE_CONTEXT"
 
-      # Le sha du commit devient la version déployée. Aucune ambiguïté possible
-      # sur ce qui tourne : ce tag ne désigne que ce commit-là.
-      - name: Déployer la version du commit
+      # L'étape qui fait tout l'intérêt du job. `set image` rend la main
+      # immédiatement, sans rien garantir : c'est `rollout status` qui attend la
+      # convergence réelle, pod par pod, et qui échoue si elle n'arrive pas.
+      # Sans lui, un tag inexistant donnerait un job vert et une prod inchangée.
+      - name: Attendre la convergence du rollout
         shell: bash
         run: |
-          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd /srv/todo && IMAGE='$IMAGE' TAG='$TAG' docker compose up -d --remove-orphans"
+          kubectl rollout status deployment/todo-api \
+            -n "$NAMESPACE" --context "$KUBE_CONTEXT" --timeout=180s
 
-      # Sans cette étape, un job vert ne prouverait qu'une chose : que les
-      # commandes sont parties. Pas que l'application répond.
-      - name: Vérifier que l'API répond
+      # Le rollout convergé prouve que les pods sont prêts au sens du cluster.
+      # Cette dernière requête prouve qu'ils rendent le service attendu, base
+      # comprise, ce que /health seul ne dirait pas.
+      - name: Vérifier que l'API répond à travers l'Ingress
         shell: bash
         run: |
-          for essai in $(seq 1 30); do
-            reponse=$(ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-              "curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/health" || echo 000)
+          for essai in $(seq 1 20); do
+            reponse=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Host: todo.localhost" http://localhost:8080/api/tasks || echo 000)
             if [ "$reponse" = "200" ]; then
-              echo "/health répond 200 après $essai tentative(s)"
-              ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "curl -s http://localhost:3000/health"
+              echo "/api/tasks répond 200 après $essai tentative(s)"
               exit 0
             fi
-            echo "tentative $essai : /health répond $reponse, nouvel essai dans 2 s"
-            sleep 2
+            echo "tentative $essai : /api/tasks répond $reponse, nouvel essai dans 3 s"
+            sleep 3
           done
-          echo "::error::/health n'a jamais répondu 200 : le déploiement est en échec"
-          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "docker ps -a --filter name=todo- ; docker logs --tail 40 todo-api" || true
+          echo "::error::/api/tasks n'a jamais répondu 200 : le déploiement est en échec"
+          kubectl get pods -n "$NAMESPACE" -o wide
+          kubectl logs -n "$NAMESPACE" -l app=todo-api --tail=40 || true
           exit 1
 
-      # L'agent meurt avec le job même sans cette ligne, mais un runner
-      # self-hosted n'est pas jetable : on ne laisse pas de clé en mémoire
-      # derrière soi sur une machine qui, elle, reste allumée.
-      - name: Décharger la clé
+      - name: Version réellement en place
         if: always()
         shell: bash
-        run: ssh-agent -k > /dev/null 2>&1 || true
+        run: |
+          kubectl get deployment todo-api -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
