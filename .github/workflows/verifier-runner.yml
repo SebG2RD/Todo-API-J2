@@ -1,7 +1,7 @@
 name: Vérifier le runner
 
 # Déclenchement manuel uniquement : ce workflow ne sert qu'à répondre à une
-# question, « le job tourne-t-il bien sur ma machine et pas dans le cloud ? ».
+# question, « le job tourne-t-il bien sur ma machine, et voit-il le cluster ? ».
 # Le lancer à chaque push n'apprendrait rien de plus.
 on:
   workflow_dispatch:
@@ -17,23 +17,24 @@ jobs:
         shell: bash
         run: hostname
 
-      # Un runner hébergé par GitHub afficherait une liste vide : il n'a ni la
-      # machine cible, ni aucun conteneur de développement.
-      - name: Conteneurs visibles depuis ce runner
-        shell: bash
-        run: docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
-
-      # La preuve qui compte : la machine cible est joignable d'ici, sur un port
-      # que le cloud de GitHub n'atteindrait jamais.
-      - name: La machine cible répond-elle sur son port SSH
+      # Un runner hébergé par GitHub afficherait « command not found » : il n'a
+      # ni kubectl configuré, ni cluster à joindre.
+      - name: Le runner voit-il le cluster
         shell: bash
         run: |
-          if docker inspect -f '{{.State.Running}}' vm-prod 2>/dev/null | grep -q true; then
-            echo "vm-prod tourne, port 2222 exposé sur cette machine"
-          else
-            echo "vm-prod est arrêtée : la démarrer avant tout déploiement"
-            exit 1
-          fi
+          kubectl config current-context
+          kubectl get nodes
+          kubectl get all -n todo
+
+      # La preuve qui compte : ce runner atteint le cluster sans clé, sans
+      # secret, sans tunnel, parce qu'il tourne sur la même machine que lui.
+      - name: L'API répond-elle à travers l'Ingress
+        shell: bash
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Host: todo.localhost" http://localhost:8080/health)
+          echo "/health répond $code"
+          [ "$code" = "200" ]
 
   chez-github:
     name: Ce que voit un runner hébergé, pour comparaison
@@ -42,5 +43,10 @@ jobs:
       - name: Identité de la machine
         run: hostname
 
-      - name: Conteneurs visibles depuis ce runner
-        run: docker ps --format '{{.Names}}\t{{.Status}}' && echo "(liste vide attendue)"
+      - name: Le cluster est-il joignable depuis le cloud
+        run: |
+          if command -v kubectl > /dev/null; then
+            kubectl config current-context 2>&1 || echo "aucun contexte : ce runner ne connaît aucun cluster"
+          else
+            echo "kubectl absent : ce runner n'a aucun moyen de joindre le cluster"
+          fi
