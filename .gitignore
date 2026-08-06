@@ -21,3 +21,6 @@ k8s/todo-secret.yaml
 # Le kubeconfig donne les pleins pouvoirs sur le cluster à quiconque le lit.
 kubeconfig*
 *.kubeconfig
+
+# Le tirage du script de chaos : la reponse, pas un livrable.
+.incident
