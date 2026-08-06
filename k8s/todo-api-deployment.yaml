@@ -14,6 +14,18 @@ spec:
   # tombe avec lui. Le selector ci-dessous n'a pas eu à changer : c'est
   # l'étiquette qui relie le Service aux pods, pas leur nombre.
   replicas: 3
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 interdit qu'un ancien pod parte avant qu'un nouveau
+      # soit prêt au sens de la readinessProbe. C'est ce réglage, et lui seul,
+      # qui rend la mise à jour transparente pour les clients.
+      maxUnavailable: 0
+      # Le prix à payer : une copie de plus le temps de la transition, donc un
+      # quart de ressources en trop pendant quelques secondes. Avec 3 replicas,
+      # le cluster monte à 4 pods au pic.
+      maxSurge: 1
   # Le selector relie ce Deployment aux pods qu'il possède. Il doit coller aux
   # labels du template ci-dessous, sinon le Deployment crée des pods qu'il ne
   # reconnaît pas et en recrée indéfiniment.
