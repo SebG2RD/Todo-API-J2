@@ -146,14 +146,29 @@ jobs:
           kubectl get nodes
           kubectl get namespace "$NAMESPACE"
 
-      # On ne touche qu'à l'image. Le reste de l'état voulu, replicas, sondes,
-      # ressources, vit dans les manifestes et n'a pas à être réécrit à chaque
-      # déploiement.
-      - name: Mettre à jour l'image du Deployment
+      # Les manifestes sont la source de vérité pour tout l'état voulu : le
+      # nombre de replicas, les sondes, les ressources, la stratégie de mise à
+      # jour. Seul le tag de l'image vient d'ailleurs, du commit qui a déclenché
+      # la pipeline.
+      #
+      # Le tag est substitué dans la copie de travail du runner, jetée avec le
+      # job, jamais dans le dépôt. Sans cette substitution, un kubectl apply
+      # ramènerait le tag écrit dans le fichier et écraserait la version que la
+      # pipeline vient de construire : c'est le piège qui se paye au premier
+      # apply manuel, avec une production qui recule d'une version sans que
+      # personne ne comprenne pourquoi.
+      - name: Déployer la version du commit
         shell: bash
         run: |
-          kubectl set image deployment/todo-api "todo-api=$IMAGE:$TAG" \
-            -n "$NAMESPACE" --context "$KUBE_CONTEXT"
+          sed -i "s|image: .*/todo-api:.*|image: $IMAGE:$TAG|" k8s/todo-api-deployment.yaml
+          grep "image:" k8s/todo-api-deployment.yaml
+          kubectl apply -n "$NAMESPACE" --context "$KUBE_CONTEXT" \
+            -f k8s/todo-config.yaml \
+            -f k8s/todo-api-deployment.yaml \
+            -f k8s/todo-api-service.yaml \
+            -f k8s/todo-ingress.yaml
+          # Le Secret n'est pas appliqué ici : ses valeurs ne sont pas dans le
+          # dépôt, et le cluster les détient déjà.
 
       # L'étape qui fait tout l'intérêt du job. `set image` rend la main
       # immédiatement, sans rien garantir : c'est `rollout status` qui attend la
