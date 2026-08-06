@@ -1,0 +1,86 @@
+# PostgreSQL, avec des données qui ne vivent plus dans le conteneur.
+#
+# Un pod est jetable par construction : il meurt, revient ailleurs, sous un
+# autre nom. C'est acceptable pour une API sans état, jamais pour une base. La
+# PersistentVolumeClaim détache les données du cycle de vie du pod, et c'est
+# tout le sens du replicas: 1 ci-dessous face au replicas: 3 de todo-api.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: todo-db-data
+  namespace: todo
+spec:
+  accessModes:
+    # ReadWriteOnce : montable en écriture par un seul nœud à la fois. Deux
+    # instances de Postgres écrivant sur les mêmes fichiers les corrompraient.
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # Aucun storageClassName : k3d fournit local-path par défaut, qui provisionne
+  # le volume sur le disque du nœud sans rien demander.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-db
+  namespace: todo
+spec:
+  replicas: 1 # une base ne se duplique pas comme un service sans état
+  selector:
+    matchLabels:
+      app: todo-db
+  template:
+    metadata:
+      labels:
+        app: todo-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          # secretKeyRef et non envFrom : l'image Postgres attend POSTGRES_*,
+          # l'API attend DB_*. Les clés sont donc reprises une par une, sous le
+          # nom que chacun réclame, à partir du même Secret.
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: todo-secret
+                  key: DB_NAME
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: todo-secret
+                  key: DB_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: todo-secret
+                  key: DB_PASSWORD
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              # subPath évite un dossier lost+found que certains volumes
+              # déposent à la racine, et que Postgres refuse au démarrage.
+              subPath: pgdata
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: todo-db-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: todo-db
+  namespace: todo
+spec:
+  # C'est ce nom, todo-db, que DB_HOST porte dans le ConfigMap. Le DNS interne
+  # du cluster le résout vers le pod du moment, sans qu'aucune adresse IP
+  # n'apparaisse nulle part.
+  selector:
+    app: todo-db
+  ports:
+    - port: 5432
+      targetPort: 5432
