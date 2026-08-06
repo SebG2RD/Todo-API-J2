@@ -237,7 +237,14 @@ mapping de port change avec `API_PORT`.
 Todo API/
 ├── .github/workflows/
 │   ├── ci.yml                  # test → test-integration → build → deploy
-│   └── verifier-runner.yml     # Preuve manuelle que le runner tourne bien chez moi
+│   └── verifier-runner.yml     # Preuve manuelle que le runner voit bien le cluster
+├── k8s/                        # L'état voulu du cluster, un fichier par objet
+│   ├── todo-api-deployment.yaml
+│   ├── todo-api-service.yaml
+│   ├── todo-config.yaml
+│   ├── todo-secret.example.yaml  # Le vrai Secret n'entre jamais dans le dépôt
+│   ├── todo-db.yaml            # PostgreSQL, sa PVC et son Service
+│   └── todo-ingress.yaml
 ├── src/
 │   ├── app.js                  # Câblage Express : middlewares, routes, erreurs
 │   ├── index.js                # Point d'entrée : attend la base, puis écoute
@@ -253,7 +260,9 @@ Todo API/
 │   └── schema.sql              # Le schéma, source unique : app, CI et migration
 ├── scripts/
 │   ├── migrate.js              # Rejoue db/schema.sql, avant les tests d'intégration
-│   └── incident.sh             # Tire une panne au hasard parmi cinq, sur la cible
+│   ├── incident.sh             # Cinq pannes tirées au sort, sur la machine du J3
+│   ├── chaos.sh                # Cinq pannes tirées au sort, sur le cluster
+│   └── charge.sh               # Charge continue, pour mesurer plutôt que croire
 ├── deploy/                     # Ce qui part sur la machine cible, et rien d'autre
 │   ├── compose.yml             # Stack de prod : API, base, Prometheus, Grafana
 │   ├── prometheus.yml          # Cibles et fréquence de collecte
@@ -339,7 +348,9 @@ hier » n'est pas reproductible, et ne prouve donc rien.
 - **Jest** et **Supertest** : tests unitaires et tests d'intégration HTTP
 - **ESLint** : le premier filet de la pipeline
 - **GitHub Actions** : lint, tests, image, déploiement, avec un runner
-  self-hosted pour la seule étape qui doit joindre une machine privée
+  self-hosted pour la seule étape qui doit joindre le cluster
+- **Kubernetes**, via **k3d** et **K3s** : le cluster où l'application tourne
+- **Traefik** : le contrôleur d'entrée fourni par K3s
 
 **CORS ?** *Cross-Origin Resource Sharing*. La règle du navigateur qui empêche, par
 défaut, une page servie par un domaine d'appeler une API hébergée sur un autre domaine.
@@ -355,8 +366,55 @@ push sur main
    ├─ test               ubuntu-latest    lint + 26 tests unitaires
    ├─ test-integration   ubuntu-latest    12 tests contre un PostgreSQL jetable
    ├─ build              ubuntu-latest    image taguée au sha, poussée sur Docker Hub
-   └─ deploy             self-hosted      SSH → docker compose up -d → curl /health
+   └─ deploy             self-hosted      kubectl apply → rollout status → curl /api/tasks
 ```
+
+### La cible : un cluster Kubernetes
+
+L'application tourne dans un cluster k3d, `todo-cluster`, dans le namespace
+`todo`. Trois copies de l'API se partagent le trafic derrière un Service, la
+base garde ses données dans un volume qui survit à son pod, et Traefik expose
+le tout sur `todo.localhost`.
+
+```bash
+k3d cluster create todo-cluster -p "8080:80@loadbalancer"
+kubectl create namespace todo
+kubectl create secret generic todo-secret -n todo \
+  --from-literal=DB_NAME=todo_prod \
+  --from-literal=DB_USER=todo_prod_user \
+  --from-literal=DB_PASSWORD='<le mot de passe>'
+kubectl apply -f k8s/
+```
+
+Vérifier :
+
+```bash
+kubectl get pods -n todo
+curl -s -H "Host: todo.localhost" http://localhost:8080/api/tasks
+```
+
+Sous Docker Desktop, `k3d` écrit un kubeconfig qui pointe sur
+`host.docker.internal`, lequel ne répond pas. Le § 6.7 de la procédure donne la
+ligne qui corrige. C'est le premier obstacle du Jour 4, et il n'a rien à voir
+avec Kubernetes.
+
+| Objet | Rôle |
+| --- | --- |
+| `k8s/todo-api-deployment.yaml` | 3 replicas, sondes, ressources, stratégie de mise à jour |
+| `k8s/todo-api-service.yaml` | Adresse stable devant des pods qui ne le sont pas |
+| `k8s/todo-config.yaml` | Configuration non sensible, injectée par `envFrom` |
+| `k8s/todo-secret.example.yaml` | Modèle du Secret. Le vrai n'est jamais versionné |
+| `k8s/todo-db.yaml` | PostgreSQL, sa PVC et son Service |
+| `k8s/todo-ingress.yaml` | La porte d'entrée, sur `todo.localhost` |
+
+Le déploiement pousse l'état voulu en entier, pas seulement l'image : le nombre
+de copies, les sondes et les ressources vivent dans les manifestes et partent
+avec eux. Seul le tag vient d'ailleurs, du commit qui a déclenché la pipeline,
+et il est substitué dans la copie de travail du runner. Un `kubectl apply` tapé
+à la main sans cette substitution ferait reculer la production d'une version.
+
+`vm-prod`, la machine cible du Jour 3, existe toujours mais reste arrêtée. Elle
+se rallume d'un `docker start vm-prod` pour comparer les deux mondes.
 
 Les trois premiers jobs tournent sur des machines fournies par GitHub, neuves à
 chaque exécution. Seul `deploy` tourne sur un runner self-hosted, et c'est
@@ -1008,15 +1066,255 @@ Une seule pipeline rouge de la journée était voulue, celle du commit
 avec `build` et `deploy` sautés. Une pipeline qui refuse de publier du code
 cassé fait exactement son travail.
 
+### Jour 4, phases 1 à 4 : l'application entre dans un cluster
+
+Le premier obstacle n'était pas Kubernetes, c'était Windows. `k3d cluster
+create` écrit un kubeconfig qui pointe sur `https://host.docker.internal:51578`,
+et ce nom résout ici vers l'IP du réseau local, qui ne répond pas. Cinq minutes
+de `dial tcp 192.168.1.114:51578: connectex: A connection attempt failed`, pour
+une correction d'une ligne :
+
+```bash
+kubectl config set-cluster k3d-todo-cluster --server="https://127.0.0.1:51578"
+```
+
+Le port publié par `k3d-todo-cluster-serverlb` était bon depuis le début, seul
+le nom d'hôte était faux. C'est noté au § 6.7 de la procédure, parce que
+personne ne devrait avoir à le retrouver deux fois.
+
+Le pod de la phase 1 n'a jamais atteint `Running`, et c'était la bonne nouvelle.
+Les logs disaient `Démarrage impossible : Variable d'environnement manquante :
+DB_HOST`. Le sujet annonce ce cas en phase 2 sous le nom de « cas cassant » : le
+code doit refuser de tourner sans ses variables plutôt que de se connecter à une
+base au hasard. Il le fait depuis le Jour 1.
+
+Les deux vérifications qui ne dépendaient pas de ce démarrage sont passées : un
+`kubectl delete pod` fait revenir un autre pod, sous un autre nom, sans qu'on
+retape quoi que ce soit, et une faute de frappe dans le nom de l'image laisse le
+pod en `ImagePullBackOff`, jamais en `Running`. Détail que je n'attendais pas :
+le pod fautif n'a **pas** remplacé l'ancien. La mise à jour progressive refuse
+de tuer une copie tant que la nouvelle n'est pas prête, et ce comportement sera
+au centre des phases 8 et 10.
+
+Sur le Secret, j'ai tranché contre la lettre du sujet. Il demande de versionner
+les manifestes, Secret compris, pendant que sa grille exige qu'aucun secret ne
+soit versionné. Un `stringData` committé n'est pas un secret, et un `data` en
+base64 non plus : il se relit en une commande. Le dépôt porte donc
+`k8s/todo-secret.example.yaml`, avec ses valeurs bidons, et le vrai Secret est
+créé par `kubectl create secret`. C'est exactement le rapport qu'entretiennent
+`.env.example` et `.env` depuis le Jour 1. La ligne du `.gitignore` a été écrite
+avant que le fichier existe.
+
+Les trois tests de la phase 3 passent. Une tâche créée par l'API survit à la
+suppression du pod PostgreSQL. Un `selector` de Service cassé volontairement
+vide la liste d'endpoints, et l'API reçoit `ECONNREFUSED` sur l'IP du Service
+alors que les pods de la base tournent toujours. Et la suppression de la PVC
+reste bloquée en `Terminating`, retenue par le finalizer
+`kubernetes.io/pvc-protection`, tant qu'un pod la monte.
+
+Ce dernier test a une conséquence qu'il vaut mieux connaître avant de le jouer :
+une fois la suppression demandée, elle ne s'annule pas. L'objet porte un
+`deletionTimestamp` et partira dès que plus aucun pod ne le montera, donc au
+premier redémarrage de la base. Il a fallu supprimer le Deployment pour libérer
+le volume, puis tout recréer.
+
+### Jour 4, phase 5 : le runner ne bouge pas, la cible si
+
+Toutes les pipelines sont passées au rouge dès la phase 1, et pour une raison
+que je n'avais pas anticipée : le job `deploy` de la veille ouvrait une
+connexion SSH vers `vm-prod`, que le sujet demande d'arrêter en tout premier
+geste de la journée. Les trois autres jobs restaient verts. La panne était
+localisée là où il fallait, mais elle a duré le temps d'arriver à la phase 5.
+
+Le remplacement est plus simple que ce qu'il remplace, ce qui est rare. Le
+runner self-hosted partage la machine du cluster, donc il lit le même
+kubeconfig que les commandes tapées à la main. Aucune clé, aucun tunnel, et les
+quatre secrets `DEPLOY_*` d'hier ne servent plus.
+
+Deux corrections ont été nécessaires côté machine, aucune dans le dépôt : le
+`PATH` du runner devait connaître `kubectl`, et le runner ne relit ce PATH qu'au
+redémarrage.
+
+Erreur de conception corrigée en cours de route, et c'est la plus utile de la
+journée. La première version du job faisait `kubectl set image`, comme le
+propose le sujet. Elle ne poussait donc que l'image : tout le reste de l'état
+voulu, `replicas`, sondes, ressources, restait dans les fichiers sans jamais
+atteindre le cluster. Pire, un `kubectl apply` tapé à la main ramenait le tag
+écrit dans le manifeste et faisait **reculer la production d'une version**, sans
+erreur ni avertissement. Constaté en direct en passant à trois replicas. Le job
+applique maintenant les manifestes avec le tag substitué dans la copie de
+travail du runner, jetée avec le job.
+
+Le troisième scénario demandé se vérifie : sur un tag inexistant,
+`rollout status` rend `error: timed out waiting for the condition` et sort en
+code 1, donc le job devient rouge. Pendant tout ce temps, les anciens pods
+continuent de répondre `200`.
+
+### Jour 4, phases 6 à 8 : mesurer plutôt que croire
+
+Trois replicas, et la preuve par le trafic plutôt que par le `get pods`. Sous
+25 s de charge à travers l'Ingress, 67 requêtes se répartissent **23 / 22 / 23**
+entre les trois pods. Le contrôle inverse est aussi net : avec un `selector` de
+Service qui ne colle à aucune étiquette, trois pods `Running` et **19 échecs sur
+19**, faute d'endpoint.
+
+Les sondes de la phase 7 mentent exactement comme le sujet l'annonce, et je ne
+m'attendais pas à ce que ce soit aussi visible :
+
+| Ce que le cluster affirme | Ce que rend le service |
+| --- | --- |
+| 3 pods `READY 1/1 Running` | `GET /health` → `200` |
+| 0 événement `Unhealthy` | `GET /api/tasks` → `503` |
+| 0 redémarrage | |
+
+Une sonde `readiness` pointée sur un port jamais exposé donne un résultat plus
+intéressant que celui annoncé : le sujet prévoit un Service sans aucun pod prêt,
+donc un refus de connexion. Avec trois replicas et `maxUnavailable: 0`, le
+nouveau pod reste `0/1`, le rollout se bloque, et les anciens continuent de
+servir. Aucune requête perdue. La sonde fait précisément son travail : elle
+empêche une mauvaise version d'entrer en service.
+
+Le tableau de comparaison de la phase 8, mesuré avec le même script des deux
+côtés, une requête toutes les 100 ms pendant le déploiement :
+
+| Déploiement | Requêtes | Échouées | Signature | Convergence |
+| --- | --- | --- | --- | --- |
+| Hier, `docker compose` sur `vm-prod` | 160 | **7** | `000`, aucune connexion | 21 s |
+| Cluster, `maxUnavailable: 0` `maxSurge: 1` | 137 | **0** | | 23 s |
+| Cluster, `maxUnavailable: 3` `maxSurge: 0` | 91 | **17** | `503` immédiats | 7 s |
+
+La troisième ligne est le contrôle qui prouve que le réglage sert à quelque
+chose. Elle dit aussi le prix : trois fois plus rapide, mais 19 % des requêtes
+perdues.
+
+Un piège de mesure a failli me faire écrire n'importe quoi. Le tout premier
+relevé sur `vm-prod` donnait 0 échec, ce qui aurait rendu la comparaison
+absurde. En cause : j'avais redéployé le tag déjà en place, donc
+`docker compose up -d` n'avait rien fait du tout. Vérifier que la commande de
+test change réellement quelque chose avant d'interpréter son résultat.
+
+Réserve à noter, parce qu'elle relativise la ligne du milieu : deux passes
+ultérieures ont compté 2 et 3 échecs, tous en `000` à exactement 10 s, soit le
+plafond `--max-time` de curl. L'un d'eux est tombé **avant** le début du
+rollout, et une passe témoin de 30 s sans aucun déploiement n'en a produit
+aucun. La signature ne ressemble pas à une perte d'endpoint, qui donne des `503`
+immédiats. Je penche pour la redirection de ports de Docker Desktop, sans
+pouvoir le prouver.
+
+### Jour 4, phase 9 : le retour arrière, comparé à celui d'hier
+
+| | Jour 3, SSH et `docker compose` | Jour 4, `kubectl rollout undo` |
+| --- | --- | --- |
+| Constat au premier `200` | 11,8 s | **13,6 s** |
+| Convergence complète | 11,8 s | 23 s |
+| Service pendant l'opération | coupé | jamais coupé |
+
+Le cluster est légèrement plus lent à rétablir, et c'est logique : il remplace
+les pods un par un au lieu de recréer un conteneur unique. Ce que le chiffre ne
+dit pas, c'est qu'hier le service était mort pendant ces 11,8 s, alors qu'ici il
+n'a jamais cessé de répondre.
+
+Première mesure jetée : j'avais lancé le chronomètre sans vérifier que la
+régression était bien en place sur les trois pods. Le relevé mélangeait des
+réponses des anciens et des nouveaux. Repris après avoir constaté dix `500`
+d'affilée.
+
+`rollout history` liste les révisions, et `--to-revision=29` en cible une
+précise. Une révision inexistante échoue proprement, `error: unable to find
+specified revision 999 in history`, code de sortie 1, sans que la production
+bouge.
+
+### Jour 4, phase 10 : ce que le cluster répare, et ce qu'il ne répare pas
+
+Le tableau des cinq pannes, toutes rejouées, aucune déduite :
+
+| # | Panne | `get pods` | `describe` / logs | Se répare seule ? | Remède |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Pod supprimé | un `Terminating`, un nouveau apparaît | rien d'anormal | **Oui, 10 s** | aucun |
+| 2 | Processus tué dans le conteneur | même pod, `RESTARTS` +1 | `Reason: Completed`, `Exit Code: 0` | **Oui, 9 s** | aucun |
+| 3 | Tag d'image inexistant | un `ImagePullBackOff`, 3 anciens `Running` | `Failed to pull image ... not found` | Non | `rollout undo`, 1 s |
+| 4 | Clé du Secret supprimée | un `CrashLoopBackOff`, 3 anciens `Running` | `Exit Code: 1`, `Variable d'environnement manquante : DB_PASSWORD` | Non | restaurer la clé, `rollout restart`, 21 s |
+| 5 | Limite mémoire à 8Mi | un `CrashLoopBackOff`, 3 anciens `Running` | `Reason: OOMKilled`, `Exit Code: 137` | Non | réappliquer le manifeste, 23 s |
+
+Ce que je retiens de cette phase tient en une ligne, et ce n'est pas ce que
+j'attendais : **les cinq pannes laissent `/api/tasks` répondre `200`**. Les
+anciens pods servent pendant que le nouveau échoue. Une panne de déploiement ne
+se voit donc pas depuis l'extérieur, elle ne se voit que dans
+`kubectl get pods`. Hier, la moitié des pannes se lisaient sur un `curl`.
+Aujourd'hui, aucune.
+
+La panne 2 n'a d'abord rien cassé du tout. `kubectl exec -- kill 1` renvoyait
+`RESTARTS=0`, et un `kill -KILL 1` ne faisait pas mieux. L'explication est dans
+le noyau : pour PID 1 d'un espace de noms, tout signal sans gestionnaire
+installé est ignoré s'il vient de ce même espace. L'image lance `node`
+directement, donc le process est PID 1, et il n'installait aucun gestionnaire.
+
+J'ai corrigé le code plutôt que le script, et j'ai eu tort sur la raison. Mon
+message de commit initial affirmait que le pod attendait ses 30 s de délai de
+grâce à chaque mise à jour. Mesuré ensuite : la terminaison prend 1,1 s sans
+gestionnaire contre 2,0 s avec, et la convergence d'un rolling update reste à
+23 s dans les deux cas. Kubelet envoie son SIGTERM depuis l'extérieur de
+l'espace de noms, là où la protection de PID 1 ne s'applique pas. Le message de
+commit a été corrigé.
+
+Ce que la correction apporte réellement, et qui suffit à la garder : le pool
+PostgreSQL se ferme au lieu d'être coupé net, les requêtes en cours disposent de
+10 s pour finir, et la panne 2 produit enfin la signature attendue.
+
+### Jour 4, phase 12 : la limite se trouve par l'échec
+
+`kubectl top` mesure 16 à 17 Mi par pod, au repos comme sous une charge de
+10 requêtes par seconde. En resserrant `limits.memory` cran par cran :
+
+| `limits.memory` | Résultat |
+| --- | --- |
+| 64Mi | tient |
+| 32Mi | tient |
+| 24Mi | tient |
+| 20Mi | tient |
+| 18Mi | **OOMKilled**, `Exit Code: 137` |
+| 16Mi | **OOMKilled** |
+
+Le plancher est donc entre 18 et 20 Mi. Deux essais ont d'abord été rejetés par
+l'API sans que je le remarque, `requests` étant resté au-dessus de la nouvelle
+`limits` : les valeurs testées n'étaient pas celles que je croyais mesurer.
+
+Le réglage retenu est pourtant `requests: 32Mi` et `limits: 96Mi`, et l'écart
+est délibéré. Le plancher a été trouvé sous une charge légère, avec un seul
+profil de requêtes. Une pointe de trafic, un corps JSON plus gros ou un
+ramasse-miettes qui passe au mauvais moment suffiraient à tuer un pod calé au
+ras de sa consommation. La mesure dit où est le mur, elle ne dit pas à quelle
+distance s'en garer. Aucune limite de CPU non plus : elle étranglerait le
+conteneur au lieu de le tuer, ce qui se diagnostique bien plus mal qu'un
+`OOMKilled`.
+
+### Jour 4, la procédure mise à l'épreuve
+
+Deux incidents tirés au hasard, diagnostiqués en ne suivant que le document.
+
+Le premier, avant la réécriture, a donné la panne 4. Le log nommait la variable
+manquante, et la réparation a pris 21 s. Le second, après réécriture, a donné la
+panne 5 : `OOMKilled`, `Exit Code: 137`, et `limits` à 8Mi dans le manifeste.
+Diagnostic posé en deux commandes, réparation en 23 s avec la commande écrite
+dans le document, sans avoir eu à le corriger.
+
+C'est la différence avec hier, où le premier incident avait révélé une ligne
+fausse dans le tableau des signatures. Cette fois, le document a tenu.
+
 ## À venir
 
 - [ ] Restreindre les origines CORS pour la production
 - [ ] Un utilisateur PostgreSQL en lecture seule pour `stats-api`
 - [ ] Pool de connexions côté `stats-api`, qui ouvre et ferme à chaque appel
-- [ ] Secrets Docker plutôt qu'un `.env` pour le mot de passe de la base
-- [ ] Une règle d'alerte Grafana sur le taux d'erreur 5xx, avec envoi réel
+- [ ] Une règle d'alerte sur le taux d'erreur 5xx, avec envoi réel
 - [ ] Un retour arrière déclenché depuis la pipeline plutôt qu'à la main
-- [ ] `node_exporter` et `postgres_exporter` sur la machine cible, pour mesurer
-      la machine et la base et non plus seulement l'application
-- [ ] Instrumenter `stats-api` de la même façon, pour qu'il apparaisse aussi
-      dans le tableau de bord
+- [ ] Instrumenter `stats-api` de la même façon, et le faire entrer dans le
+      cluster à son tour
+- [ ] Remonter Prometheus et Grafana dans le cluster, avec `node_exporter` et
+      `postgres_exporter` pour mesurer le nœud et la base
+- [ ] Un `/health` qui distingue « le serveur répond » de « la base répond »,
+      sans exposer les sondes à une cascade d'échecs
+- [ ] Un `StatefulSet` pour `todo-db` plutôt qu'un `Deployment`, qui est le
+      bon objet pour une charge à état
+- [ ] Enregistrer le runner comme service Windows, pour qu'il survive à un
+      redémarrage du poste
