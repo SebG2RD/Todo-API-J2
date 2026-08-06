@@ -1,0 +1,25 @@
+# Le Service donne une adresse stable à des pods qui, eux, ne le sont pas.
+#
+# Un pod meurt, revient sous un autre nom et une autre IP. Personne ne peut
+# viser un pod directement. Le Service, lui, garde le même nom et la même IP
+# interne pour toute la vie du cluster, et route vers les pods qui portent
+# l'étiquette ci-dessous, quel que soit leur nombre.
+apiVersion: v1
+kind: Service
+metadata:
+  name: todo-api
+  namespace: todo
+spec:
+  # ClusterIP : joignable uniquement depuis l'intérieur du cluster. L'ouverture
+  # vers l'extérieur est le travail de l'Ingress, pas celui du Service.
+  type: ClusterIP
+  # C'est l'étiquette qui fait le lien, jamais un nom de pod. Passer de 1 à 3
+  # replicas ne demande donc aucune modification ici.
+  selector:
+    app: todo-api
+  ports:
+    - name: http
+      # Le port exposé par le Service, celui qu'on appelle.
+      port: 80
+      # Le port réellement ouvert dans le conteneur.
+      targetPort: 3000
