@@ -45,3 +45,35 @@ spec:
                 name: todo-config
             - secretRef:
                 name: todo-secret
+
+          # Deux sondes, deux décisions différentes.
+          #
+          # readiness décide QUI REÇOIT LE TRAFIC. Tant qu'elle échoue, le
+          # Service retire le pod de ses endpoints, sans le tuer. C'est elle qui
+          # permet un rolling update sans perte : un nouveau pod n'encaisse rien
+          # tant qu'il n'a pas fini de démarrer.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            # Court : l'application démarre en moins d'une seconde une fois la
+            # base joignable, et on veut la mettre en service au plus tôt.
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          # liveness décide QUI REDÉMARRE. Elle ne retire rien du Service, elle
+          # tue le conteneur pour qu'il reparte propre.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            # Plus large que la readiness, volontairement. Une liveness trop
+            # impatiente redémarre un pod qui n'avait besoin que d'un peu de
+            # temps, et transforme une lenteur passagère en boucle de
+            # redémarrages qui, elle, ne passe pas.
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
