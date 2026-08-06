@@ -10,7 +10,10 @@ metadata:
   name: todo-api
   namespace: todo
 spec:
-  replicas: 1
+  # Trois copies, et non une. Une copie unique encaisse tout le trafic seule et
+  # tombe avec lui. Le selector ci-dessous n'a pas eu à changer : c'est
+  # l'étiquette qui relie le Service aux pods, pas leur nombre.
+  replicas: 3
   # Le selector relie ce Deployment aux pods qu'il possède. Il doit coller aux
   # labels du template ci-dessous, sinon le Deployment crée des pods qu'il ne
   # reconnaît pas et en recrée indéfiniment.
